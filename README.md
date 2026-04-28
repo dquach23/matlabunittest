@@ -13,15 +13,67 @@ never wrote down.
 
 ## Quick start
 
+Run `autotestGUI` from the MATLAB command window, pick your project folder
+when the dialog appears, and find results under `<yourProject>/_autotest/`:
+
+```matlab
+autotestGUI
+```
+
+That single call:
+
+1. Recursively finds every `.m` (function or classdef) and `.mlapp` source
+   in the chosen folder, skipping anything that already looks like a test
+   (`^t[A-Z]` / `^test[A-Z]`) and anything inside `_autotest/`.
+2. Generates a `matlab.unittest.TestCase` for each source via
+   `generateTests`, mirroring the source tree under `_autotest/generated/`.
+3. Runs the suite with TAP and JUnit-XML plugins attached, capturing the
+   whole run in a timestamped diary log.
+4. Writes a human-readable summary, a JUnit `results.xml` for CI, and a
+   `results.tap` for TAP-aware tools, then pops a small dialog with the
+   pass/fail tallies and an "Open output folder" button.
+
+The last-used folder is remembered between sessions
+(`getpref('autotest','LastFolder')`).
+
+For finer control use the underlying API directly:
+
 ```matlab
 % From the repo root
 generateTests('examples/sampleFunctions.m')   % writes tsampleFunctions.m next to the source
 generateTests('examples/Calculator.m', 'OutputDir', 'tests')
 runtests('tsampleFunctions')
+
+% Or call the workflow without a GUI:
+info = autotest.runWorkflow('/path/to/project');
+disp(info.Summary)
 ```
 
-The top-level entry point is [`generateTests`](generateTests.m). The
-implementation lives under the `+autotest` package.
+The top-level entry points are [`autotestGUI`](autotestGUI.m) and
+[`generateTests`](generateTests.m). The implementation lives under the
+`+autotest` package.
+
+## Output layout
+
+`autotestGUI` (and `autotest.runWorkflow`) drop everything under
+`<yourProject>/_autotest/`:
+
+```
+_autotest/
+    generated/        auto-generated tXxx.m files (mirrors source tree)
+    reports/
+        summary.txt   passed/failed/skipped counts per source
+        results.xml   JUnit-style XML (for CI tools)
+        results.tap   TAP output
+    logs/
+        run-YYYYMMDD-HHMMSS.log   full diary of the run
+        generation-errors.txt     per-file generation failures, if any
+    exports/          reserved for additional artefacts
+```
+
+`_autotest/` is added to `.gitignore` automatically. Re-running the
+workflow replaces `generated/` and overwrites `reports/`, but each run's
+log is kept in `logs/` so you can compare runs.
 
 ## What gets generated
 
@@ -50,60 +102,4 @@ For a **`.mlapp`** App Designer file:
 
 ## Options
 
-```matlab
-generateTests('Calc.m', ...
-    'OutputDir',         'tests', ...   % where to write
-    'TestClassName',     'tCalc', ...   % override class name (default: 't' + source name)
-    'Overwrite',         true, ...
-    'PropertyTests',     true, ...      % randomised invariants
-    'EdgeCaseTests',     true, ...
-    'DocExampleTests',   true, ...
-    'AppCallbackTests',  true, ...      % .mlapp only
-    'Verbose',           false);
-```
-
-## Layout
-
-```
-+autotest/
-  TestGenerator.m   % orchestrator
-  MFileParser.m     % parses .m
-  MlappParser.m     % unzips & parses .mlapp
-  SourceModel.m     % intermediate model
-  InputSampler.m    % generates input expressions
-  TestWriter.m      % emits the test class
-generateTests.m     % top-level entry point
-examples/
-  sampleFunctions.m
-  Calculator.m
-  SimpleApp.mlapp   % minimal App Designer fixture
-tests/
-  tParser.m         % parser/generator self-tests (function + classdef)
-  tMlappParser.m    % parser/generator self-tests (App Designer)
-  runSelfTests.m    % runner
-```
-
-## Self-tests
-
-```matlab
-addpath(pwd);
-runtests('tests')
-% or:
-tests/runSelfTests
-```
-
-## Caveats
-
-- The parser is regex-based with light state tracking. It handles
-  well-formed code (function files, classdefs, `arguments` blocks, line
-  continuations, line/block comments, and most string-literal cases) but
-  is not a full MATLAB grammar.
-- Generated tests cover *behaviour-doesn't-blow-up*, not behaviour
-  correctness. Add specific `verifyEqual` calls by hand to assert real
-  contracts, then re-run `generateTests` with a different
-  `'TestClassName'` to keep handwritten tests separate from generated
-  ones.
-- For `.mlapp` apps, callback invocation simulates an event struct and
-  passes the resolved component as the source; if your callback derefs
-  uncommon event fields, expect to flesh out the synthetic event.
-- Property-based tests use `rand` and seed `rng
+```matla

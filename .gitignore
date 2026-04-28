@@ -9,11 +9,4 @@ slprj/
 *.tmp.m
 tmp_*/
 
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Editors
-.vscode/
-.idea/
+# autotestGUI / autotest.runWorkflow output (generated tests, re
