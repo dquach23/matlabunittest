@@ -1,0 +1,19 @@
+# MATLAB
+*.asv
+*.autosave
+*.mex*
+*.slxc
+slprj/
+
+# Generated tests committed under examples/expected stay; ignore ad hoc runs.
+*.tmp.m
+tmp_*/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
