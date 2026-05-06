@@ -9,4 +9,5 @@ slprj/
 *.tmp.m
 tmp_*/
 
-# autotestGUI / autotest.runWorkflow output (generated tests, re
+# autotestGUI / autotest.runWorkflow output (generated tests, reports,
+# lo

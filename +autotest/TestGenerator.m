@@ -9,13 +9,17 @@ classdef TestGenerator < handle
         SourcePath           (1,:) char
         SourceExt            (1,:) char
         OutputDir            (1,:) char
+        UserStubDir          (1,:) char
         TestClassName        (1,:) char
+        UserStubClassName    (1,:) char
         Overwrite            (1,1) logical
         PropertyTests        (1,1) logical
         EdgeCaseTests        (1,1) logical
         DocExampleTests      (1,1) logical
         AppCallbackTests     (1,1) logical
         Verbose              (1,1) logical
+        FixtureProvider                       % autotest.FixtureProvider | []
+        TargetFolder         (1,:) char       % project root, used by KnownRealSignal
     end
 
     methods
@@ -23,13 +27,17 @@ classdef TestGenerator < handle
             p = inputParser();
             p.addRequired('sourcePath', @(x) ischar(x) || (isstring(x) && isscalar(x)));
             p.addParameter('OutputDir', '', @(x) ischar(x) || isstring(x));
+            p.addParameter('UserStubDir', '', @(x) ischar(x) || isstring(x));
             p.addParameter('TestClassName', '', @(x) ischar(x) || isstring(x));
+            p.addParameter('UserStubClassName', '', @(x) ischar(x) || isstring(x));
             p.addParameter('Overwrite', true, @islogical);
             p.addParameter('PropertyTests', true, @islogical);
             p.addParameter('EdgeCaseTests', true, @islogical);
             p.addParameter('DocExampleTests', true, @islogical);
             p.addParameter('AppCallbackTests', true, @islogical);
             p.addParameter('Verbose', false, @islogical);
+            p.addParameter('FixtureProvider', [], @(x) isempty(x) || isa(x, 'autotest.FixtureProvider'));
+            p.addParameter('TargetFolder', '', @(x) ischar(x) || isstring(x));
             p.parse(sourcePath, varargin{:});
             r = p.Results;
 
@@ -55,12 +63,27 @@ classdef TestGenerator < handle
             else
                 obj.TestClassName = char(r.TestClassName);
             end
+            if isempty(char(r.UserStubDir))
+                obj.UserStubDir = '';
+            else
+                obj.UserStubDir = autotest.TestGenerator.resolvePath(char(r.UserStubDir));
+                if ~isfolder(obj.UserStubDir)
+                    mkdir(obj.UserStubDir);
+                end
+            end
+            if isempty(char(r.UserStubClassName))
+                obj.UserStubClassName = ['u' srcName];
+            else
+                obj.UserStubClassName = char(r.UserStubClassName);
+            end
             obj.Overwrite        = r.Overwrite;
             obj.PropertyTests    = r.PropertyTests;
             obj.EdgeCaseTests    = r.EdgeCaseTests;
             obj.DocExampleTests  = r.DocExampleTests;
             obj.AppCallbackTests = r.AppCallbackTests;
             obj.Verbose          = r.Verbose;
+            obj.FixtureProvider  = r.FixtureProvider;
+            obj.TargetFolder     = char(r.TargetFolder);
         end
 
         function testFile = run(obj)
@@ -91,6 +114,16 @@ classdef TestGenerator < handle
             writer.writeTo(testFile);
 
             obj.log('Wrote %s', testFile);
+
+            if ~isempty(obj.UserStubDir)
+                stubFile = fullfile(obj.UserStubDir, [obj.UserStubClassName '.m']);
+                wrote = writer.writeUserStubTo(stubFile, obj.UserStubClassName);
+                if wrote
+                    obj.log('Wrote user stub %s', stubFile);
+                else
+                    obj.log('Preserved existing user stub %s', stubFile);
+                end
+            end
         end
     end
 

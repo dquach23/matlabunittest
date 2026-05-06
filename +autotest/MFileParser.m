@@ -212,6 +212,15 @@ classdef MFileParser < handle
                     break;
                 end
             end
+
+            % Phase 2.4: tag classes whose ctor leaves required container
+            % state empty (dictionary, containers.Map, struct, cell).  The
+            % TestWriter uses this to emit testSkipped_<name> placeholders
+            % for instance methods on stateful classes when the
+            % FixtureProvider doesn't resolve a realistic call -- moves
+            % crashes-because-state-is-empty failures from Failed to
+            % Incomplete with a reason.
+            obj.detectStateful(lines, model);
         end
 
         function [endIdx, props] = parsePropertiesBlock(obj, lines, startIdx, attrs)
@@ -428,6 +437,168 @@ classdef MFileParser < handle
                 end
             end
         end
+
+        function detectStateful(obj, lines, model)
+            % Set model.IsStateful = true when the constructor body leaves
+            % one or more container-typed properties (dictionary,
+            % containers.Map, struct, cell) empty.  Builds a human-readable
+            % StatefulReason listing the property names involved so the
+            % TestWriter can splice it into the assumeFail message.
+            % NOTE: This is called from parseClassdef BEFORE model.Kind is
+            % set to 'classdef' (parse() sets it on return), so don't
+            % gate on Kind here -- having a ClassName + Properties is the
+            % real classdef indicator at this point.
+            if isempty(model.ClassName) || isempty(model.Properties)
+                return;
+            end
+            [ctorLineIdx, ctorOutName] = obj.findConstructorLine( ...
+                lines, model.ClassName);
+            if ctorLineIdx == 0 || isempty(ctorOutName)
+                return;
+            end
+            bodyEndIdx = obj.findMatchingEnd(lines, ctorLineIdx + 1);
+
+            propNames = {model.Properties.Name};
+            leftEmpty = {};
+            assignRe = ['^\s*' regexptranslate('escape', ctorOutName) ...
+                '\.([A-Za-z]\w*)\s*=\s*(.+)$'];
+
+            for i = (ctorLineIdx+1):(bodyEndIdx-1)
+                t = strtrim(lines(i).Code);
+                if isempty(t), continue; end
+                % Strip trailing semicolon (and any whitespace after it).
+                t = regexprep(t, ';\s*$', '');
+                tok = regexp(t, assignRe, 'tokens', 'once');
+                if isempty(tok), continue; end
+                propName = tok{1};
+                rhs = strtrim(tok{2});
+                if ~ismember(propName, propNames), continue; end
+                if ~autotest.MFileParser.isContainerEmpty(rhs), continue; end
+                if ismember(propName, leftEmpty), continue; end
+                % Phase 3 (Option 1 fallout): in addition to typed
+                % container properties (Phase 2.4's strict criterion),
+                % flag UNTYPED properties when the ctor RHS is a specific
+                % named-container constructor (dictionary[*], containers.Map[*],
+                % struct[*]).  This catches TableMetadata.Tables / .Data /
+                % .Relationships -- properties declared `Tables` (no
+                % type) and assigned `obj.Tables = dictionary;` in the
+                % ctor, then read by every other method.  Raw `{}` / `[]`
+                % RHS values are too generic to stand alone so we still
+                % require a declared cell/struct type for those.  The
+                % typed branch is preserved unchanged so ExcelProcessor's
+                % current 1-failure baseline doesn't shift.
+                rhsNamed = autotest.MFileParser.isNamedContainerEmpty(rhs);
+                for p = 1:numel(model.Properties)
+                    if ~strcmp(model.Properties(p).Name, propName), continue; end
+                    def = strtrim(char(model.Properties(p).Default));
+                    if ~isempty(def), break; end  % has default -> skip
+                    declaredType = lower(strtrim(char(model.Properties(p).Type)));
+                    declaredType = regexprep(declaredType, '^\([^)]*\)\s*', '');
+                    declaredType = strtrim(declaredType);
+                    typedMatch = any(strcmp(declaredType, ...
+                        {'dictionary', 'containers.map', 'struct', 'cell'}));
+                    untypedNamedMatch = isempty(declaredType) && rhsNamed;
+                    if typedMatch || untypedNamedMatch
+                        leftEmpty{end+1} = propName; %#ok<AGROW>
+                    end
+                    break;
+                end
+            end
+
+            % Phase 6 (Option 1): also detect fopen()-style state-init.
+            % The class manages a FileID lifecycle when:
+            %   1. ctor body assigns `obj.X = fopen(...)`
+            %   2. property X is declared (typed `double` or untyped)
+            %      with no default value
+            %   3. class is a handle (has `delete(obj)` destructor)
+            %   4. some method body calls `fclose(<x>.X)` for at least
+            %      one such property -- the fopen->fclose lifecycle
+            %      signature.
+            % This is the ReportWriter / TextRedactor pattern.  Without
+            % the destructor + fclose check the property might just be
+            % a transient handle, not a managed lifecycle.
+            fopenProps = autotest.MFileParser.findFopenAssignmentsInCtor( ...
+                lines, ctorLineIdx, ctorOutName, bodyEndIdx);
+            fopenLifecycle = {};
+            for fp = 1:numel(fopenProps)
+                propName = fopenProps{fp};
+                if ~ismember(propName, propNames), continue; end
+                if ismember(propName, leftEmpty), continue; end
+                for p = 1:numel(model.Properties)
+                    if ~strcmp(model.Properties(p).Name, propName), continue; end
+                    def = strtrim(char(model.Properties(p).Default));
+                    if ~isempty(def), break; end
+                    declaredType = lower(strtrim(char(model.Properties(p).Type)));
+                    declaredType = regexprep(declaredType, '^\([^)]*\)\s*', '');
+                    declaredType = strtrim(declaredType);
+                    typedDouble  = strcmp(declaredType, 'double');
+                    untypedAny   = isempty(declaredType);
+                    if typedDouble || untypedAny
+                        fopenLifecycle{end+1} = propName; %#ok<AGROW>
+                    end
+                    break;
+                end
+            end
+            if ~isempty(fopenLifecycle)
+                hf = autotest.MFileParser.hasFcloseInDestructor(lines, model.ClassName, fopenLifecycle);
+                if hf
+                    leftEmpty = [leftEmpty, fopenLifecycle];
+                else
+                    fopenLifecycle = {};
+                end
+            else
+                fopenLifecycle = {};
+            end
+
+            if ~isempty(leftEmpty)
+                model.IsStateful = true;
+                if ~isempty(fopenLifecycle) && ~isequal(leftEmpty, fopenLifecycle)
+                    % Mixed case: container-empty + fopen-lifecycle.
+                    containerProps = setdiff(leftEmpty, fopenLifecycle, 'stable');
+                    model.StatefulReason = sprintf( ...
+                        ['stateful class -- ctor leaves %s empty; ' ...
+                         'method requires populated state; ' ...
+                         'ctor opens %s via fopen(); methods require live file handle'], ...
+                        strjoin(containerProps, ', '), ...
+                        strjoin(fopenLifecycle, ', '));
+                elseif ~isempty(fopenLifecycle)
+                    % Pure fopen-lifecycle case.
+                    model.StatefulReason = sprintf( ...
+                        ['stateful class -- ctor opens %s via fopen(); ' ...
+                         'methods require live file handle'], ...
+                        strjoin(fopenLifecycle, ', '));
+                else
+                    model.StatefulReason = sprintf( ...
+                        ['stateful class -- ctor leaves %s empty; ' ...
+                         'method requires populated state'], ...
+                        strjoin(leftEmpty, ', '));
+                end
+            end
+        end
+
+        function [ctorLineIdx, ctorOutName] = findConstructorLine(~, lines, className)
+            % Locate `function <out> = <ClassName>(...)` (or with bracketed
+            % single output) anywhere in the file.  Returns the line index
+            % and the captured output-variable name.
+            ctorLineIdx = 0;
+            ctorOutName = '';
+            cls = regexptranslate('escape', className);
+            re1 = ['^function\s+(\w+)\s*=\s*' cls '\s*\('];
+            re2 = ['^function\s+\[\s*(\w+)\s*\]\s*=\s*' cls '\s*\('];
+            for i = 1:numel(lines)
+                t = strtrim(lines(i).Code);
+                if isempty(t) || ~startsWith(t, 'function'), continue; end
+                tok = regexp(t, re1, 'tokens', 'once');
+                if isempty(tok)
+                    tok = regexp(t, re2, 'tokens', 'once');
+                end
+                if ~isempty(tok)
+                    ctorLineIdx = i;
+                    ctorOutName = tok{1};
+                    return;
+                end
+            end
+        end
     end
 
     methods (Static, Access = private)
@@ -588,5 +759,152 @@ classdef MFileParser < handle
                 ln = lines{i};
                 trimmed = strtrim(ln);
                 if isempty(trimmed)
+                    % Blank line after content terminates the block; a
+                    % blank line before any content is just leading
+                    % whitespace and should be skipped.
                     if ~isempty(buf), break; end
-  
+                    i = i + 1;
+                    continue;
+                end
+                % A new help section header (See also:, Example:) ends the
+                % block as well.
+                if ~isempty(regexpi(trimmed, '^see also[:.]', 'once')) ...
+                        || ~isempty(regexpi(trimmed, '^example[s]?\s*[:.]?\s*$', 'once'))
+                    break;
+                end
+                buf(end+1,1) = string(trimmed); %#ok<AGROW>
+                i = i + 1;
+            end
+            if isempty(buf)
+                block = '';
+            else
+                block = char(strjoin(buf, newline));
+            end
+            nextIdx = i;
+        end
+
+        function tf = isNamedContainerEmpty(rhs)
+            % Returns true when RHS is an explicit named-container
+            % constructor (dictionary*, containers.Map*, struct*).
+            % Used to extend Phase 2.4's stateful detection to UNTYPED
+            % properties whose ctor RHS clearly identifies the intended
+            % container kind.  Excludes raw `{}` and `[]` because those
+            % are too generic to stand alone (they could be any list,
+            % numeric matrix, etc.).
+            rhs = strtrim(rhs);
+            rhs = regexprep(rhs, ';\s*$', '');
+            rhs = strtrim(rhs);
+            tf = false;
+            if isempty(rhs), return; end
+            patterns = { ...
+                '^dictionary\s*$', ...
+                '^dictionary\s*\(\s*\)\s*$', ...
+                '^dictionary\s*\(\s*"[^"]+"\s*,.*\)\s*$', ...
+                '^containers\.Map\s*$', ...
+                '^containers\.Map\s*\(\s*\)\s*$', ...
+                '^struct\s*$', ...
+                '^struct\s*\(\s*\)\s*$' };
+            for k = 1:numel(patterns)
+                if ~isempty(regexp(rhs, patterns{k}, 'once'))
+                    tf = true;
+                    return;
+                end
+            end
+        end
+
+        function tf = isContainerEmpty(rhs)
+            % Returns true when RHS is one of the canonical "empty
+            % container" forms.  Used by detectStateful to decide whether
+            % a ctor assignment leaves a property in an empty state that
+            % subsequent methods will need to populate.
+            rhs = strtrim(rhs);
+            rhs = regexprep(rhs, ';\s*$', '');
+            rhs = strtrim(rhs);
+            if isempty(rhs)
+                tf = true; return;
+            end
+            patterns = { ...
+                '^dictionary\s*$', ...
+                '^dictionary\s*\(\s*\)\s*$', ...
+                '^dictionary\s*\(\s*"[^"]+"\s*,.*\)\s*$', ...
+                '^containers\.Map\s*$', ...
+                '^containers\.Map\s*\(\s*\)\s*$', ...
+                '^struct\s*$', ...
+                '^struct\s*\(\s*\)\s*$', ...
+                '^\{\s*\}\s*$', ...
+                '^\[\s*\]\s*$' };
+            tf = false;
+            for k = 1:numel(patterns)
+                if ~isempty(regexp(rhs, patterns{k}, 'once'))
+                    tf = true;
+                    return;
+                end
+            end
+        end
+
+        function props = findFopenAssignmentsInCtor(lines, ctorLineIdx, ctorOutName, bodyEndIdx)
+            % Phase 6 (Option 1) helper.  Scan the constructor body for
+            % `<ctorOutName>.X = fopen(...)` assignments and return the
+            % set of property names X that appear on the LHS.  Sibling
+            % to the assignment-walker in detectStateful; uses the same
+            % LHS-shape regex but a separate fopen() RHS check.
+            props = {};
+            if ctorLineIdx == 0 || isempty(ctorOutName), return; end
+            assignRe = ['^\s*' regexptranslate('escape', ctorOutName) ...
+                '\.([A-Za-z]\w*)\s*=\s*(.+)$'];
+            for i = (ctorLineIdx+1):(bodyEndIdx-1)
+                t = strtrim(lines(i).Code);
+                if isempty(t), continue; end
+                t = regexprep(t, ';\s*$', '');
+                tok = regexp(t, assignRe, 'tokens', 'once');
+                if isempty(tok), continue; end
+                rhs = strtrim(tok{2});
+                if isempty(regexp(rhs, '^fopen\s*\(', 'once')), continue; end
+                propName = tok{1};
+                if ~ismember(propName, props)
+                    props{end+1} = propName; %#ok<AGROW>
+                end
+            end
+        end
+
+        function tf = hasFcloseInDestructor(lines, className, propNames)
+            % Phase 6 (Option 1) helper.  Returns true when:
+            %   1. The class defines a `function delete(<obj>)` destructor.
+            %   2. Some method in the class body calls `fclose(...)` on a
+            %      property in propNames.
+            % The second check is intentionally lenient: a delete() that
+            % calls obj.close() which calls fclose(obj.FileID) is the
+            % ReportWriter pattern, and walking the method-call graph from
+            % delete() down through every helper would be brittle.  Requires
+            % (a) a destructor exists AND (b) some line contains BOTH
+            % "fclose(" AND ".<propName>".  This is a heuristic but matches
+            % the intent: a stateful FileID lifecycle.  Uses substring
+            % search rather than regex because MATLAB's regex engine has
+            % quirks with backslash-dot patterns built via line continuation.
+            tf = false;
+            if isempty(className) || isempty(propNames), return; end
+            hasDelete = false;
+            for i = 1:numel(lines)
+                t = strtrim(lines(i).Code);
+                if isempty(t), continue; end
+                if startsWith(t, 'function delete(') ...
+                        || ~isempty(regexp(t, '^function\s+delete\s*\(', 'once'))
+                    hasDelete = true;
+                    break;
+                end
+            end
+            if ~hasDelete, return; end
+            for p = 1:numel(propNames)
+                needle = ['.' propNames{p}];
+                for i = 1:numel(lines)
+                    t = lines(i).Code;
+                    if isempty(t), continue; end
+                    if contains(t, 'fclose(') && contains(t, needle)
+                        tf = true;
+                        return;
+                    end
+                end
+            end
+        end
+    end
+end

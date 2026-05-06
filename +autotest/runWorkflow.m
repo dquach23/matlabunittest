@@ -52,14 +52,18 @@ function info = runWorkflow(folder, varargin)
 
     % ── Output layout ────────────────────────────────────────────────────
     generatedDir = fullfile(outRoot, 'generated');
+    userTestsDir = fullfile(outRoot, 'user_tests');
     reportsDir   = fullfile(outRoot, 'reports');
     logsDir      = fullfile(outRoot, 'logs');
     exportsDir   = fullfile(outRoot, 'exports');
 
+    % Wipe ONLY the auto-generated tree.  user_tests/ is sticky so the
+    % hand-written user stubs persist across re-runs.
     if isfolder(generatedDir)
         rmdir(generatedDir, 's');
     end
     mkdirIfMissing(generatedDir);
+    mkdirIfMissing(userTestsDir);
     mkdirIfMissing(reportsDir);
     mkdirIfMissing(logsDir);
     mkdirIfMissing(exportsDir);
@@ -88,19 +92,54 @@ function info = runWorkflow(folder, varargin)
     % ── Manage MATLAB path so generated tests can find their sources ────
     pathSnap = path();
     pathCleanup = onCleanup(@() path(pathSnap)); %#ok<NASGU>
+    % Snapshot the figures that already exist so we can mop up any GUI
+    % windows the test run launches but fails to close.  Without this,
+    % running tests against an .mlapp can leave dozens of stranded windows
+    % on the desktop.
+    preFigs = findall(groot, 'Type', 'figure');
+    figCleanup = onCleanup(@() closeLeakedFigures(preFigs)); %#ok<NASGU>
     addProjectPaths(folder, outRoot);
+
+    % ── Build a project-wide FixtureProvider ─────────────────────────────
+    % Scans ONCE for usable fixtures (toolTester.xlsx, sample images, keep
+    % / dirty list workbooks, etc.) so each generator pass can ask "is
+    % there a realistic literal I should pass for this argument?" instead
+    % of falling back to synthetic 1/[]/NaN.
+    provider = autotest.FixtureProvider(folder);
+    if provider.hasFixtures()
+        fprintf('Fixture index: %d xlsx, %d images, %d text, %d mat\n', ...
+            numel(provider.ExcelFiles), numel(provider.ImageFiles), ...
+            numel(provider.TextFiles), numel(provider.MatFiles));
+        if ~isempty(provider.PrimaryExcel)
+            relExcel = strrep(provider.PrimaryExcel, [folder filesep], '');
+            fprintf('  primary excel:    %s\n', relExcel);
+        end
+        if ~isempty(provider.PrimaryKeepList)
+            fprintf('  keep list:        %s\n', ...
+                strrep(provider.PrimaryKeepList, [folder filesep], ''));
+        end
+        if ~isempty(provider.PrimaryDirtyList)
+            fprintf('  dirty list:       %s\n', ...
+                strrep(provider.PrimaryDirtyList, [folder filesep], ''));
+        end
+    end
 
     % ── Generate tests ───────────────────────────────────────────────────
     genErrors = strings(0,1);
     for i = 1:numel(sources)
         s = sources(i);
         relSubdir = fileparts(s.RelPath);
-        outDir = fullfile(generatedDir, relSubdir);
+        outDir    = fullfile(generatedDir,  relSubdir);
+        stubDir   = fullfile(userTestsDir,  relSubdir);
         mkdirIfMissing(outDir);
+        mkdirIfMissing(stubDir);
         try
             tFile = generateTests(s.Path, ...
-                'OutputDir', outDir, ...
-                'Verbose',   r.Verbose);
+                'OutputDir',       outDir, ...
+                'UserStubDir',     stubDir, ...
+                'FixtureProvider', provider, ...
+                'TargetFolder',    folder, ...
+                'Verbose',         r.Verbose);
             sources(i).Generated     = true;
             sources(i).GeneratedTest = tFile;
             fprintf('  [ok] %s -> %s\n', s.RelPath, ...
@@ -121,10 +160,11 @@ function info = runWorkflow(folder, varargin)
             numel(genErrors), errFile);
     end
 
-    addpath(generatedDir);
+    addpath(genpath(generatedDir));
+    addpath(genpath(userTestsDir));
 
     % ── Run tests ────────────────────────────────────────────────────────
-    [results, summary] = runGeneratedTests(generatedDir, reportsDir);
+    [results, summary] = runGeneratedTests({generatedDir, userTestsDir}, reportsDir);
 
     % ── Write summary report ─────────────────────────────────────────────
     summaryFile = fullfile(reportsDir, 'summary.txt');
@@ -141,6 +181,7 @@ function info = runWorkflow(folder, varargin)
         'Folder',        folder, ...
         'OutputRoot',    outRoot, ...
         'GeneratedDir',  generatedDir, ...
+        'UserTestsDir',  userTestsDir, ...
         'ReportsDir',    reportsDir, ...
         'LogsDir',       logsDir, ...
         'ExportsDir',    exportsDir, ...
@@ -150,6 +191,18 @@ function info = runWorkflow(folder, varargin)
         'Timestamp',     timestamp, ...
         'LogFile',       logFile, ...
         'GenerationErrors', {cellstr(genErrors)});
+
+    % ── Render polished reports (HTML + Markdown + best-effort PDF) ──────
+    % These supplement (not replace) the existing summary.txt /
+    % results.xml / results.tap so CI consumers and humans both have a
+    % usable view.
+    try
+        autotest.ReportRenderer.renderAll(info);
+        fprintf('Wrote report.html, report.md, report.pdf in %s\n', reportsDir);
+    catch ME
+        warning('autotest:ReportRenderer', ...
+            'Polished report rendering failed: %s', ME.message);
+    end
 end
 
 % =============================================================================
@@ -171,6 +224,12 @@ function sources = discoverSources(folder, outRoot)
         full = fullfile(d.folder, d.name);
         % Skip anything inside the autotest output root.
         if startsWith(normalisePath(full), [normalisePath(outRoot) filesep])
+            continue
+        end
+        % Skip anything inside a VCS / IDE / dependency folder.  We use the
+        % folder of the dirent rather than the file basename so we catch
+        % files several levels deep inside (e.g. .git/hooks/foo.sample).
+        if isInsideIgnoredFolder(d.folder, folder)
             continue
         end
         [~, name, ext] = fileparts(d.name);
@@ -196,20 +255,58 @@ function sources = discoverSources(folder, outRoot)
 end
 
 function tf = isLikelyTestFile(name)
+    % Phase 7 (Option 3): also exclude run_*.m launcher scripts
+    % (e.g. run_autotest.m) -- they're entry points, not testable
+    % surfaces, and generating a trivial existence-only test class for
+    % them adds noise to the per-source breakdown.
     tf = ~isempty(regexp(name, '^t[A-Z]', 'once')) || ...
-         ~isempty(regexp(name, '^test[A-Z]', 'once'));
+         ~isempty(regexp(name, '^test[A-Z]', 'once')) || ...
+         ~isempty(regexp(name, '^run_[A-Za-z]', 'once'));
+end
+
+function tf = isInsideIgnoredFolder(folderOfFile, projectRoot)
+    % Check whether any path component (relative to PROJECTROOT) matches a
+    % name that we know we never want to scan.  Keeping the check on path
+    % components -- not substrings -- avoids accidentally hiding a folder
+    % whose name happens to contain ".git" or "node_modules".
+    ignored = {'.git', '.svn', '.hg', '.idea', '.vscode', ...
+               'node_modules', '_autotest'};
+    rel = relativePath(folderOfFile, projectRoot);
+    if isempty(rel)
+        tf = false;
+        return
+    end
+    parts = strsplit(rel, filesep);
+    parts(cellfun(@isempty, parts)) = [];
+    tf = any(ismember(parts, ignored));
 end
 
 function addProjectPaths(folder, outRoot)
     % Add every non-package, non-class subdirectory under FOLDER to the
-    % MATLAB path, excluding anything inside outRoot.
-    raw = strsplit(genpath(folder), pathsep);
+    % MATLAB path, excluding anything inside outRoot or inside a known VCS /
+    % IDE folder.  Failures here are non-fatal (we warn and continue): the
+    % generated tests fall back to per-test addpath of the source file's
+    % own directory in TestMethodSetup, so a missing project-wide addpath
+    % only affects cross-folder dependencies.
+    try
+        raw = strsplit(genpath(folder), pathsep);
+    catch ME
+        warning('autotest:addProjectPaths', ...
+            'genpath failed for %s: %s', folder, ME.message);
+        return
+    end
     raw = raw(~cellfun(@isempty, raw));
     keep = false(size(raw));
     outNorm = normalisePath(outRoot);
+    ignored = {'.git', '.svn', '.hg', '.idea', '.vscode', ...
+               'node_modules', '_autotest'};
     for i = 1:numel(raw)
         n = normalisePath(raw{i});
         if strcmp(n, outNorm) || startsWith(n, [outNorm filesep])
+            continue
+        end
+        if any(cellfun(@(seg) ~isempty(strfind([filesep n filesep], ...
+                [filesep seg filesep])), ignored))
             continue
         end
         keep(i) = true;
@@ -220,12 +317,16 @@ function addProjectPaths(folder, outRoot)
     end
 end
 
-function [results, summary] = runGeneratedTests(generatedDir, reportsDir)
+function [results, summary] = runGeneratedTests(testDirs, reportsDir)
     import matlab.unittest.TestSuite
     import matlab.unittest.TestRunner
     import matlab.unittest.plugins.TAPPlugin
     import matlab.unittest.plugins.XMLPlugin
     import matlab.unittest.plugins.ToFile
+
+    if ischar(testDirs) || isstring(testDirs)
+        testDirs = cellstr(testDirs);
+    end
 
     tapFile = fullfile(reportsDir, 'results.tap');
     xmlFile = fullfile(reportsDir, 'results.xml');
@@ -237,11 +338,28 @@ function [results, summary] = runGeneratedTests(generatedDir, reportsDir)
         end
     end
 
-    suite = TestSuite.fromFolder(generatedDir, 'IncludingSubfolders', true);
+    % Build the suite by unioning every test directory we were given.
+    % Empty per-dir suites are fine -- they just contribute nothing.
+    suite = matlab.unittest.Test.empty;
+    for i = 1:numel(testDirs)
+        d = testDirs{i};
+        if ~isfolder(d), inue; end
+        try
+            sub = TestSuite.fromFolder(d, 'IncludingSubfolders', true);
+        catch ME
+            warning('autotest:Suite', ...
+                'Could not collect tests from %s: %s', d, ME.message);
+            continue
+        end
+        suite = [suite, sub]; %#ok<AGROW>
+    end
     if isempty(suite)
         results = matlab.unittest.TestResult.empty;
         summary = struct('Total', 0, 'Passed', 0, 'Failed', 0, ...
-            'Incomplete', 0, 'DurationSeconds', 0);
+            'Incomplete', 0, 'DurationSeconds', 0, ...
+            'GeneratedTotal', 0, 'GeneratedPassed', 0, ...
+            'GeneratedFailed', 0, 'GeneratedIncomplete', 0, ...
+            'UserStubTotal', 0, 'UserStubIncomplete', 0);
         return
     end
 
@@ -258,12 +376,31 @@ function [results, summary] = runGeneratedTests(generatedDir, reportsDir)
     end
 
     results = runner.run(suite);
+    % Phase 1.5: split user-stub Incompletes out of the headline.
+    isUserStub = false(size(results));
+    for i = 1:numel(results)
+        nm = char(results(i).Name);
+        slash = strfind(nm, '/');
+        if isempty(slash), continue; end
+        prefix = nm(1:slash(1)-1);
+        if ~isempty(prefix) && prefix(1) == 'u'
+            isUserStub(i) = true;
+        end
+    end
+    gen = results(~isUserStub);
+    usr = results(isUserStub);
     summary = struct( ...
-        'Total',           numel(results), ...
-        'Passed',          sum([results.Passed]), ...
-        'Failed',          sum([results.Failed]), ...
-        'Incomplete',      sum([results.Incomplete]), ...
-        'DurationSeconds', sum([results.Duration]));
+        'Total',                numel(results), ...
+        'Passed',               sum([results.Passed]), ...
+        'Failed',               sum([results.Failed]), ...
+        'Incomplete',           sum([results.Incomplete]), ...
+        'DurationSeconds',      sum([results.Duration]), ...
+        'GeneratedTotal',       numel(gen), ...
+        'GeneratedPassed',      sum([gen.Passed]), ...
+        'GeneratedFailed',      sum([gen.Failed]), ...
+        'GeneratedIncomplete',  sum([gen.Incomplete]), ...
+        'UserStubTotal',        numel(usr), ...
+        'UserStubIncomplete',   sum([usr.Incomplete]));
 end
 
 function writeSummary(file, folder, outRoot, timestamp, sources, results, summary, genErrors)
@@ -281,6 +418,17 @@ function writeSummary(file, folder, outRoot, timestamp, sources, results, summar
         lines(end+1,1) = sprintf("  failed:         %d", numel(sources) - nGen);
     end
     lines(end+1,1) = "";
+    if isfield(summary, 'GeneratedTotal')
+        lines(end+1,1) = sprintf("Generated tests:  %d", summary.GeneratedTotal);
+        lines(end+1,1) = sprintf("  passed:         %d", summary.GeneratedPassed);
+        lines(end+1,1) = sprintf("  failed:         %d", summary.GeneratedFailed);
+        lines(end+1,1) = sprintf("  incomplete:     %d", summary.GeneratedIncomplete);
+        lines(end+1,1) = "";
+        lines(end+1,1) = sprintf("User stub tests:  %d (all Incomplete by design --", ...
+            summary.UserStubTotal);
+        lines(end+1,1) = "                  fill in user_tests/u<Name>.m to enable)";
+        lines(end+1,1) = "";
+    end
     lines(end+1,1) = sprintf("Total tests:      %d", summary.Total);
     lines(end+1,1) = sprintf("  passed:         %d", summary.Passed);
     lines(end+1,1) = sprintf("  failed:         %d", summary.Failed);
@@ -344,6 +492,27 @@ end
 function mkdirIfMissing(d)
     if ~isfolder(d)
         mkdir(d);
+    end
+end
+
+function closeLeakedFigures(preFigs)
+    try
+        postFigs = findall(groot, 'Type', 'figure');
+        if isempty(postFigs)
+            return
+        end
+        if isempty(preFigs)
+            leaked = postFigs;
+        else
+            leaked = setdiff(postFigs, preFigs);
+        end
+        for k = 1:numel(leaked)
+            try
+                delete(leaked(k));
+            catch
+            end
+        end
+    catch
     end
 end
 

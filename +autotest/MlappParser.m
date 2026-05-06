@@ -60,6 +60,20 @@ classdef MlappParser < handle
             % Promote methods that look like callbacks (suffix Callback,
             % ButtonPushed, ValueChanged, etc.) into the Callbacks struct.
             model.Callbacks = obj.identifyCallbacks(model.Methods, callbackMap);
+
+            % Phase 3 (Option 2): tag each callback with UsesFileDialog
+            % and DialogFunctions when its body calls
+            % uigetfile/uiputfile/uigetdir.  Driven from the raw .m
+            % source we already extracted from the .mlapp archive.
+            for k = 1:numel(model.Callbacks)
+                cbName = model.Callbacks(k).Name;
+                dialogs = autotest.MlappFixtureProvider.detectForCallback( ...
+                    srcM, cbName);
+                if ~isempty(dialogs)
+                    model.Callbacks(k).UsesFileDialog = true;
+                    model.Callbacks(k).DialogFunctions = dialogs;
+                end
+            end
         end
     end
 
@@ -152,6 +166,9 @@ classdef MlappParser < handle
                     if isKey(callbackMap, m.Name)
                         cb.ComponentTag = callbackMap(m.Name);
                     end
+                    % UsesFileDialog / DialogFunctions are populated
+                    % later by parse() once srcM is in scope.  Leave the
+                    % defaults from makeCallback in place here.
                     cbs(end+1) = cb; %#ok<AGROW>
                 end
             end
@@ -178,4 +195,21 @@ classdef MlappParser < handle
                 blob = cdata{k}{1};
                 if contains(blob, 'classdef')
                     code = blob;
-                    retur
+                    return;
+                end
+            end
+        end
+
+        function tryRmdir(d)
+            % Best-effort cleanup of a temp directory.  Swallow errors so
+            % cleanup never masks a more interesting upstream failure.
+            try
+                if isfolder(d)
+                    rmdir(d, 's');
+                end
+            catch
+                % ignore
+            end
+        end
+    end
+end

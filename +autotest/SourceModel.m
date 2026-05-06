@@ -18,6 +18,8 @@ classdef SourceModel < handle
         Components        (1,:) struct = autotest.SourceModel.emptyComponent()
         ConstructorArgs   (1,:) cell  = {}
         IsHandle          (1,1) logical = false
+        IsStateful        (1,1) logical = false
+        StatefulReason    (1,:) char    = ''
     end
 
     methods (Static)
@@ -36,7 +38,8 @@ classdef SourceModel < handle
 
         function s = emptyCallback()
             s = struct('Name', {}, 'ComponentTag', {}, ...
-                'EventName', {}, 'Inputs', {});
+                'EventName', {}, 'Inputs', {}, ...
+                'UsesFileDialog', {}, 'DialogFunctions', {});
         end
 
         function s = emptyComponent()
@@ -73,7 +76,13 @@ classdef SourceModel < handle
                 'Name', name, ...
                 'ComponentTag', '', ...
                 'EventName', '', ...
-                'Inputs', {{}});
+                'Inputs', {{}}, ...
+                'UsesFileDialog', false, ...
+                'DialogFunctions', {{}});
         end
 
-        function c = makeComponent(tag, 
+        function c = makeComponent(tag, type)
+            c = struct('Tag', tag, 'Type', type);
+        end
+    end
+end
