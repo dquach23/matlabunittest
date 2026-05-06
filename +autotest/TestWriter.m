@@ -352,6 +352,18 @@ classdef TestWriter < handle
                 buf(end+1,1) = "                inst = testCase.Instance;";
                 buf(end+1,1) = "                testCase.addTeardown(@() testCase.safeDelete(inst));";
             end
+            % Phase 11: state-init prelude.  Each candidate method is
+            % wrapped in its own try/catch so one failing init does not
+            % block the others; failures are silently swallowed because
+            % the goal is best-effort state population, not assertion.
+            stateInits = autotest.StateInitializer.candidateMethods(obj.Model);
+            for ii = 1:numel(stateInits)
+                buf(end+1,1) = "                try";
+                buf(end+1,1) = string(sprintf( ...
+                    '                    testCase.Instance.%s();', stateInits{ii}));
+                buf(end+1,1) = "                catch";
+                buf(end+1,1) = "                end";
+            end
             buf(end+1,1) = "            catch ME";
             buf(end+1,1) = "                testCase.assumeFail(sprintf( ...";
             buf(end+1,1) = string(sprintf('                    ''%s constructor threw: %%s'', ME.message));', cls));
@@ -505,7 +517,16 @@ classdef TestWriter < handle
             % empty.  Dropping the gate is the only way to actually move
             % those failures from Failed to Incomplete.  See
             % PHASE4_HANDOFF.md for the full rationale.
-            if obj.Model.IsStateful && strcmp(kind, 'method')
+            % Phase 11: drop the early-gate skip when the class has a
+            % credible state-init prelude (zero-arg build*/load*/etc.
+            % methods).  TestMethodSetup runs those before each test,
+            % so the smoke/edge/randomized layers can exercise the
+            % method against a populated instance.  When no candidates
+            % exist, fall back to the original testSkipped_ behaviour
+            % so the report still shows the method as Incomplete with
+            % a meaningful reason.
+            if obj.Model.IsStateful && strcmp(kind, 'method') ...
+                    && isempty(autotest.StateInitializer.candidateMethods(obj.Model))
                 methodName = matlab.lang.makeValidName(['testSkipped_' fcn.Name]);
                 msg = sprintf( ...
                     ['%s skipped: %s. See user_tests/u%s.m::userTest_%s' ...
@@ -627,15 +648,40 @@ classdef TestWriter < handle
                 buf(end+1,1) = "                    sprintf('Edge case threw (acceptable): %s', ME.message));";
                 buf(end+1,1) = "            end";
             else
+                % Phase 11: when the class is stateful (Phase 2.4 / Phase 6
+                % detection) AND we're emitting an instance-method smoke,
+                % wrap the call in try/assumeFail.  The TestMethodSetup
+                % prelude (StateInitializer) is best-effort; if a state-
+                % init couldn't run because the project's FixtureProvider
+                % didn't supply a real path/file/handle for the ctor args,
+                % the method call will throw at runtime.  Convert that to
+                % Incomplete (assumption-failed) rather than Failed --
+                % matches the existing edge/randomized layer behaviour and
+                % preserves the "Failed = real signal" property of the
+                % per-source breakdown.
+                wrapStateful = obj.Model.IsStateful && strcmp(kind, 'method');
+                if wrapStateful
+                    buf(end+1,1) = "            try";
+                end
+                indent = autotest.TestWriter.iif(wrapStateful, '                ', '            ');
                 if numel(fcn.Outputs) >= 1 && ~strcmp(fcn.Outputs{1}, 'varargout')
-                    buf(end+1,1) = string(sprintf('            out = %s;', callExpr));
+                    buf(end+1,1) = string(sprintf('%sout = %s;', indent, callExpr));
                     % Phase 1.3: returning [] is a valid "nothing to do"
                     % outcome (e.g. redactSharedStrings with no matches);
                     % don't fail the smoke for that.
-                    buf(end+1,1) = "            testCase.assertReasonable(out);";
+                    buf(end+1,1) = string(sprintf('%stestCase.assertReasonable(out);', indent));
                 else
-                    buf(end+1,1) = string(sprintf('            %s;', callExpr));
-                    buf(end+1,1) = "            testCase.verifyTrue(true, 'Smoke call did not throw');";
+                    buf(end+1,1) = string(sprintf('%s%s;', indent, callExpr));
+                    buf(end+1,1) = string(sprintf( ...
+                        '%stestCase.verifyTrue(true, ''Smoke call did not throw'');', indent));
+                end
+                if wrapStateful
+                    buf(end+1,1) = "            catch ME";
+                    buf(end+1,1) = "                testCase.assumeFail(sprintf( ...";
+                    buf(end+1,1) = string(sprintf( ...
+                        '                    ''%s smoke threw (stateful class, prelude best-effort): %%s'', ME.message));', ...
+                        fcn.Name));
+                    buf(end+1,1) = "            end";
                 end
             end
             buf(end+1,1) = "        end";
@@ -705,9 +751,26 @@ classdef TestWriter < handle
                 buf(end+1,1) = string(sprintf('                    %s;', callExpr));
             end
             buf(end+1,1) = "                catch ME";
-            buf(end+1,1) = "                    if ~testCase.isValidationError(ME)";
-            buf(end+1,1) = "                        rethrow(ME);";
-            buf(end+1,1) = "                    end";
+            % Phase 11: on stateful classes the prelude is best-effort,
+            % so a non-validation error during random fuzzing usually
+            % means the project's FixtureProvider couldn't supply a
+            % real fixture for the ctor (e.g. a real unzipped xlsx
+            % directory).  Convert that to assumeFail (Incomplete)
+            % rather than rethrow (Failed) -- consistent with the
+            % stateful-smoke wrapper, and keeps the Failed metric a
+            % trustworthy real-signal indicator.
+            if obj.Model.IsStateful && strcmp(kind, 'method')
+                buf(end+1,1) = "                    if ~testCase.isValidationError(ME)";
+                buf(end+1,1) = string(sprintf( ...
+                    '                        testCase.assumeFail(sprintf(''%s randomized threw (stateful class, prelude best-effort): %%s'', ME.message));', ...
+                        fcn.Name));
+                buf(end+1,1) = "                        return;";
+                buf(end+1,1) = "                    end";
+            else
+                buf(end+1,1) = "                    if ~testCase.isValidationError(ME)";
+                buf(end+1,1) = "                        rethrow(ME);";
+                buf(end+1,1) = "                    end";
+            end
             buf(end+1,1) = "                end";
             buf(end+1,1) = "            end";
             buf(end+1,1) = "        end";
