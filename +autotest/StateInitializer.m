@@ -107,5 +107,150 @@ classdef StateInitializer
                 names = [names, buckets{k}]; %#ok<AGROW>
             end
         end
+
+        function calls = candidateMethodCalls(model, fixtureProvider)
+            %CANDIDATEMETHODCALLS  Full call expressions for the state-init prelude.
+            %
+            %   calls = autotest.StateInitializer.candidateMethodCalls(model, fixtureProvider)
+            %
+            %   Returns a cell array of CALL EXPRESSION strings such as
+            %       'buildLookupMaps()'                       -- zero-arg state-init
+            %       'addTable(''Table1'', 1, ''A1'')'         -- multi-arg, all args resolved
+            %
+            %   Phase 11 returned only the names of zero-arg state-init
+            %   methods.  Phase 13 keeps that list (formatted as 'name()'
+            %   strings) and ALSO scans for multi-arg state-init candidates
+            %   whose arguments can be entirely resolved by FIXTUREPROVIDER
+            %   (FixtureProvider.literalForArg + InputSampler.scalarFor as a
+            %   typed fallback).  Multi-arg candidates are included only when
+            %   EVERY argument resolves to a non-empty literal -- the same
+            %   all-or-nothing discipline used by smartFor (Phase 12 lesson:
+            %   half-fixtured calls into project code can hit non-terminating
+            %   paths that try/catch cannot unstick).
+            %
+            %   Multi-arg prefixes recognised: 'add', 'register', 'attach',
+            %   'insert', 'put', 'set'.  Methods with output arguments are
+            %   excluded (queries, not state mutators); so are methods on the
+            %   destructor / teardown negativeExact list.  Generic across any
+            %   MATLAB project that uses these conventional verbs.
+            arguments
+                model
+                fixtureProvider = []
+            end
+
+            calls = {};
+            if isempty(model)
+                return;
+            end
+            if ~isa(model, 'autotest.SourceModel')
+                return;
+            end
+            if ~strcmp(model.Kind, 'classdef')
+                return;
+            end
+
+            % Zero-arg candidates first.  These are always safe and never
+            % require a fixture provider; they reuse the established
+            % candidateMethods detection.
+            zeroArg = autotest.StateInitializer.candidateMethods(model);
+            for i = 1:numel(zeroArg)
+                calls{end+1} = [zeroArg{i} '()']; %#ok<AGROW>
+            end
+
+            % Multi-arg path needs a real FixtureProvider.  Without one we
+            % stop here -- existing zero-arg behaviour is preserved.
+            if isempty(fixtureProvider) ...
+                    || ~isa(fixtureProvider, 'autotest.FixtureProvider')
+                return;
+            end
+            if isempty(model.Methods)
+                return;
+            end
+
+            multiPrefixes = {'add', 'register', 'attach', 'insert', 'put', 'set'};
+            negativeExact = {'delete', 'close', 'cleanup', 'destroy', ...
+                             'finalize', 'tearDown', 'teardown'};
+
+            for i = 1:numel(model.Methods)
+                m = model.Methods(i);
+                if ~isfield(m, 'Name') || isempty(m.Name), continue; end
+                if ~m.IsPublic, continue; end
+                if m.IsStatic, continue; end
+                if strcmp(m.Name, model.ClassName), continue; end
+                if any(strcmp(m.Name, negativeExact)), continue; end
+                % Skip zero-arg (already covered above).
+                if isempty(m.Inputs), continue; end
+                % State mutators do not return values.
+                if ~isempty(m.Outputs), continue; end
+
+                lname = lower(m.Name);
+                matched = false;
+                for p = 1:numel(multiPrefixes)
+                    pat = multiPrefixes{p};
+                    if strncmp(lname, pat, numel(pat))
+                        matched = true;
+                        break;
+                    end
+                end
+                if ~matched, continue; end
+
+                resolved = autotest.StateInitializer.tryResolveArgs( ...
+                    m, fixtureProvider);
+                if isempty(resolved), continue; end
+
+                callStr = sprintf('%s(%s)', m.Name, strjoin(resolved, ', '));
+                calls{end+1} = callStr; %#ok<AGROW>
+            end
+        end
+
+        function resolved = tryResolveArgs(m, fixtureProvider)
+            %TRYRESOLVEARGS  All-or-nothing FixtureProvider resolution.
+            %
+            %   Returns a cell array of literal expressions (one per input)
+            %   if EVERY positional input resolves; otherwise returns {}.
+            %   varargin is treated as unresolvable -- the prelude must not
+            %   guess at variadic state-init signatures.
+            resolved = {};
+            inputs = m.Inputs;
+            if isempty(inputs)
+                return;
+            end
+            try
+                typed = autotest.InputSampler.typesFromArguments( ...
+                    inputs, m.ArgumentBlocks);
+            catch
+                return;
+            end
+            out = cell(1, numel(inputs));
+            for k = 1:numel(inputs)
+                argName = inputs{k};
+                if strcmp(argName, 'varargin'), return; end
+                argInfo = typed{k};
+                expr = '';
+                try
+                    expr = fixtureProvider.literalForArg( ...
+                        argName, argInfo, '');
+                catch
+                    return;
+                end
+                if isempty(expr)
+                    % Fallback: typed scalarFor when the FixtureProvider
+                    % had nothing name-driven for this arg.  scalarFor only
+                    % yields a plausible literal when the type is known
+                    % (string/char/numeric/logical/etc) -- otherwise we
+                    % bail and the entire candidate is dropped.
+                    try
+                        expr = autotest.InputSampler.scalarFor(argInfo);
+                    catch
+                        return;
+                    end
+                end
+                if isempty(expr)
+                    return;
+                end
+                out{k} = expr;
+            end
+            resolved = out;
+        end
     end
 end

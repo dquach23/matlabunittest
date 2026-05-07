@@ -90,13 +90,29 @@ classdef FixtureProvider < handle
             end
 
             % --- Stringy name-only heuristics (message/text/title/...) ----
+            % Phase 13: extend the exact-name list with common composite
+            % suffixes (titleText, headerText, subtitle) so callers like
+            % createCenteredHeader(titleText, padChar) resolve cleanly.
             if stringyOrUnknown ...
                     && (strcmp(lname, 'message') || strcmp(lname, 'msg') ...
                         || strcmp(lname, 'text')    || strcmp(lname, 'title') ...
                         || strcmp(lname, 'caption') || strcmp(lname, 'label') ...
                         || strcmp(lname, 'header')  || strcmp(lname, 'string') ...
-                        || strcmp(lname, 'str')     || strcmp(lname, 'word'))
+                        || strcmp(lname, 'str')     || strcmp(lname, 'word') ...
+                        || endsWith(lname, 'titletext') || endsWith(lname, 'headertext') ...
+                        || endsWith(lname, 'subtitle'))
                 expr = '''hello''';
+                return;
+            end
+
+            % Phase 13: pad/fill character args (createCenteredHeader's
+            % padChar, drawSeparator's fillChar, etc.).  A printable ASCII
+            % glyph is the only safe synthetic value; '*' is the
+            % conventional choice for separators in plain-text reports.
+            if stringyOrUnknown ...
+                    && (strcmp(lname, 'padchar') || endsWith(lname, 'padchar') ...
+                        || strcmp(lname, 'fillchar') || endsWith(lname, 'fillchar'))
+                expr = '''*''';
                 return;
             end
 
@@ -128,7 +144,8 @@ classdef FixtureProvider < handle
             end
 
             if stringyOrUnknown ...
-                    && (strcmp(lname, 'cellref') || endsWith(lname, 'cellref'))
+                    && (strcmp(lname, 'cellref') || endsWith(lname, 'cellref') ...
+                        || strcmp(lname, 'celllocation') || endsWith(lname, 'celllocation'))
                 expr = '''A1''';
                 return;
             end
@@ -155,11 +172,15 @@ classdef FixtureProvider < handle
                     expr = '''Sheet''';
                     return;
                 end
-                if strcmp(lname, 'tablename')
+                % Phase 13: extend tablename / columnname to also match
+                % composite names (existingTableName, primaryColumnName,
+                % columnNames plural).
+                if strcmp(lname, 'tablename') || endsWith(lname, 'tablename')
                     expr = '''Table1''';
                     return;
                 end
-                if strcmp(lname, 'columnname')
+                if strcmp(lname, 'columnname') || endsWith(lname, 'columnname') ...
+                        || strcmp(lname, 'columnnames') || endsWith(lname, 'columnnames')
                     expr = '''Comments''';
                     return;
                 end

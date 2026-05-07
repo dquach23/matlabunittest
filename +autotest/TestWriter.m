@@ -356,11 +356,20 @@ classdef TestWriter < handle
             % wrapped in its own try/catch so one failing init does not
             % block the others; failures are silently swallowed because
             % the goal is best-effort state population, not assertion.
-            stateInits = autotest.StateInitializer.candidateMethods(obj.Model);
+            % Phase 13: switched from candidateMethods (zero-arg only,
+            % returned bare names) to candidateMethodCalls (zero-arg AND
+            % multi-arg state-init detection, returns full call expressions).
+            % FixtureProvider is consulted for multi-arg arg resolution.
+            stateInitProvider = [];
+            if ~isempty(obj.Options) && isprop(obj.Options, 'FixtureProvider')
+                stateInitProvider = obj.Options.FixtureProvider;
+            end
+            stateInits = autotest.StateInitializer.candidateMethodCalls( ...
+                obj.Model, stateInitProvider);
             for ii = 1:numel(stateInits)
                 buf(end+1,1) = "                try";
                 buf(end+1,1) = string(sprintf( ...
-                    '                    testCase.Instance.%s();', stateInits{ii}));
+                    '                    testCase.Instance.%s;', stateInits{ii}));
                 buf(end+1,1) = "                catch";
                 buf(end+1,1) = "                end";
             end
@@ -541,9 +550,20 @@ classdef TestWriter < handle
             % consulted for the gate decision.
             isFopenOnly = ~isempty(strfind(obj.Model.StatefulReason, 'fopen()')) ...
                 && isempty(strfind(obj.Model.StatefulReason, 'leaves'));
+            % Phase 13: gate decision now consults candidateMethodCalls,
+            % which includes multi-arg state-init candidates resolved via
+            % FixtureProvider.  When a class such as TableMetadata exposes
+            % addX(name, value, ...) state-init methods whose args resolve
+            % cleanly, the gate is dropped and the smoke/edge layers run
+            % against an instance pre-populated by TestMethodSetup.
+            gateProvider = [];
+            if ~isempty(obj.Options) && isprop(obj.Options, 'FixtureProvider')
+                gateProvider = obj.Options.FixtureProvider;
+            end
             if obj.Model.IsStateful && strcmp(kind, 'method') ...
                     && ~isFopenOnly ...
-                    && isempty(autotest.StateInitializer.candidateMethods(obj.Model))
+                    && isempty(autotest.StateInitializer.candidateMethodCalls( ...
+                        obj.Model, gateProvider))
                 methodName = matlab.lang.makeValidName(['testSkipped_' fcn.Name]);
                 msg = sprintf( ...
                     ['%s skipped: %s. See user_tests/u%s.m::userTest_%s' ...
