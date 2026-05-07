@@ -76,6 +76,19 @@ classdef FixtureProvider < handle
                 return;
             end
 
+            % --- Phase 12: DOM-named/typed args -> in-memory DOM ----
+            % Generic across projects: name match (`*DOM`, `*Document`,
+            % `dom`, `doc`, `xmlDoc`, `xmlNode`) plus type match for
+            % org.w3c.dom.* / matlab.io.xml.dom.*.  The expression
+            % evaluates inside a TestCase method where `testCase` is
+            % in scope.  See InputSampler.tempDOM for the actual
+            % javax.xml.parsers builder call.
+            if autotest.InputSampler.isDOMName(argName) ...
+                    || autotest.InputSampler.isDOMType(argInfo)
+                expr = autotest.InputSampler.domExpr();
+                return;
+            end
+
             % --- Stringy name-only heuristics (message/text/title/...) ----
             if stringyOrUnknown ...
                     && (strcmp(lname, 'message') || strcmp(lname, 'msg') ...
@@ -84,6 +97,22 @@ classdef FixtureProvider < handle
                         || strcmp(lname, 'header')  || strcmp(lname, 'string') ...
                         || strcmp(lname, 'str')     || strcmp(lname, 'word'))
                 expr = '''hello''';
+                return;
+            end
+
+            % --- Phase 12: XML tag / element / attribute names -> 'a'
+            % These appear alongside DOM args in XML-manipulating
+            % functions (removeElements(dom, tagName), getAttribute(
+            % node, attrName)).  A short ASCII identifier is the
+            % safest synthetic value for Java DOM APIs that expect a
+            % String.  `'a'` is the same shape MATLAB's scalarFor
+            % returns for a typed `char` arg, so callers that DO have
+            % an `arguments` block declaring `char` are unaffected.
+            if stringyOrUnknown ...
+                    && (endsWith(lname, 'tagname') || endsWith(lname, 'elementname') ...
+                        || endsWith(lname, 'attrname') || endsWith(lname, 'attributename') ...
+                        || endsWith(lname, 'nodename') || endsWith(lname, 'partname'))
+                expr = '''a''';
                 return;
             end
 

@@ -216,6 +216,87 @@ classdef InputSampler
             end
         end
 
+        function tf = isDOMName(argName)
+            %ISDOMNAME  True if argName looks like an XML DOM handle.
+            %   Phase 12: name-based detection so functions taking a
+            %   *DOM / *Document / dom arg get a real in-memory
+            %   org.w3c.dom.Document in their smoke / edge / randomized
+            %   tests rather than a numeric scalar (which Java rejects).
+            %   Generic across projects: pure name match using the
+            %   convention that DOM args are camelCased with a `DOM` /
+            %   `Document` suffix.  Case-sensitive on the suffix to
+            %   avoid false positives on lowercase identifiers like
+            %   `random`, `freedom`, `wisdom`.
+            tf = false;
+            if isempty(argName), return; end
+            a = strtrim(char(argName));
+            % Exact match (lower-case or upper-case `dom`).
+            if strcmp(a, 'dom') || strcmp(a, 'DOM') ...
+                    || strcmp(a, 'doc') || strcmp(a, 'Doc') ...
+                    || strcmp(a, 'document') || strcmp(a, 'Document') ...
+                    || strcmp(a, 'xmlDoc') || strcmp(a, 'xmlDocument') ...
+                    || strcmp(a, 'xmlNode')
+                tf = true; return;
+            end
+            % Suffix match -- case-sensitive on the marker.
+            if length(a) >= 4 && (endsWith(a, 'DOM') || endsWith(a, 'Document'))
+                tf = true; return;
+            end
+        end
+
+        function tf = isDOMType(t)
+            %ISDOMTYPE  True if t is a typed DOM info struct/string.
+            %   Recognises org.w3c.dom.* and matlab.io.xml.dom.* names.
+            tf = false;
+            if isempty(t), return; end
+            if isstruct(t) && isfield(t, 'Type')
+                ty = t.Type;
+            else
+                ty = t;
+            end
+            tyLow = lower(strtrim(char(ty)));
+            if isempty(tyLow), return; end
+            domExact = { ...
+                'org.w3c.dom.document', 'org.w3c.dom.node', ...
+                'org.w3c.dom.element', 'org.w3c.dom.nodelist', ...
+                'org.apache.xerces.dom.documentimpl', ...
+                'matlab.io.xml.dom.document', ...
+                'matlab.io.xml.dom.node', 'matlab.io.xml.dom.element'};
+            if any(strcmp(tyLow, domExact))
+                tf = true; return;
+            end
+            domPrefix = {'org.w3c.dom.', 'matlab.io.xml.dom.'};
+            for k = 1:numel(domPrefix)
+                if startsWith(tyLow, domPrefix{k})
+                    tf = true; return;
+                end
+            end
+        end
+
+        function expr = domExpr()
+            %DOMEXPR  Canonical expression for a DOM smoke arg.
+            %   Returns a call to tempDOM(testCase) which is a real
+            %   in-memory org.w3c.dom.Document (one root element).
+            %   testCase is always in scope inside any
+            %   matlab.unittest.TestCase method (Phase 12).
+            expr = 'autotest.InputSampler.tempDOM(testCase)';
+        end
+
+        function dom = tempDOM(testCase) %#ok<INUSD>
+            %TEMPDOM  Build an empty in-memory DOM document.
+            %   Phase 12: backs the DOM-aware input synthesis.
+            %   The returned document has one `<root/>` element and
+            %   is GC'd when the test method ends -- no teardown
+            %   needed (in-memory only, no file handles or COM).
+            %   testCase is accepted for signature parity with
+            %   tempFileID and to leave room for future addTeardown.
+            factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            builder = factory.newDocumentBuilder();
+            dom = builder.newDocument();
+            root = dom.createElement('root');
+            dom.appendChild(root);
+        end
+
         function tf = isOpaqueType(t, argName)
             if nargin < 2, argName = ''; end
             tf = false;

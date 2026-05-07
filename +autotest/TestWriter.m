@@ -525,7 +525,24 @@ classdef TestWriter < handle
             % exist, fall back to the original testSkipped_ behaviour
             % so the report still shows the method as Incomplete with
             % a meaningful reason.
+            % Phase 12 (candidate 1): also drop the gate for classes
+            % whose StatefulReason is PURELY fopen-lifecycle (ctor opens
+            % a file via fopen + handle-class destructor calls fclose).
+            % The constructor itself establishes the live file handle,
+            % so methods can be called once construction succeeds; no
+            % separate state-init prelude is needed.  Phase 11's
+            % stateful-smoke and stateful-randomized try/assumeFail
+            % wrappers convert any synthetic-input-mismatch throws
+            % (e.g. fprintf '%s' format error on numeric input) to
+            % Incomplete -- so dropping the gate is safe.  Mixed-case
+            % StatefulReason (container-empty AND fopen-lifecycle) is
+            % unaffected: those still need a state-init prelude on the
+            % container side, and StateInitializer.candidateMethods is
+            % consulted for the gate decision.
+            isFopenOnly = ~isempty(strfind(obj.Model.StatefulReason, 'fopen()')) ...
+                && isempty(strfind(obj.Model.StatefulReason, 'leaves'));
             if obj.Model.IsStateful && strcmp(kind, 'method') ...
+                    && ~isFopenOnly ...
                     && isempty(autotest.StateInitializer.candidateMethods(obj.Model))
                 methodName = matlab.lang.makeValidName(['testSkipped_' fcn.Name]);
                 msg = sprintf( ...
@@ -660,10 +677,18 @@ classdef TestWriter < handle
                 % preserves the "Failed = real signal" property of the
                 % per-source breakdown.
                 wrapStateful = obj.Model.IsStateful && strcmp(kind, 'method');
-                if wrapStateful
+                % Phase 12: also wrap when the smoke uses a fixture
+                % (tempDOM, tempFileID).  Static methods that resolve
+                % DOM args via FixtureProvider may enter project-side
+                % code paths that fileread() non-existent files; treat
+                % the throw as Incomplete rather than Failed.
+                wrapFixture = ~isempty(strfind(callExpr, 'autotest.InputSampler.tempDOM(testCase)')) ...
+                    || ~isempty(strfind(callExpr, 'autotest.InputSampler.tempFileID(testCase)'));
+                wrapSmoke = wrapStateful || wrapFixture;
+                if wrapSmoke
                     buf(end+1,1) = "            try";
                 end
-                indent = autotest.TestWriter.iif(wrapStateful, '                ', '            ');
+                indent = autotest.TestWriter.iif(wrapSmoke, '                ', '            ');
                 if numel(fcn.Outputs) >= 1 && ~strcmp(fcn.Outputs{1}, 'varargout')
                     buf(end+1,1) = string(sprintf('%sout = %s;', indent, callExpr));
                     % Phase 1.3: returning [] is a valid "nothing to do"
@@ -675,12 +700,18 @@ classdef TestWriter < handle
                     buf(end+1,1) = string(sprintf( ...
                         '%stestCase.verifyTrue(true, ''Smoke call did not throw'');', indent));
                 end
-                if wrapStateful
+                if wrapSmoke
                     buf(end+1,1) = "            catch ME";
                     buf(end+1,1) = "                testCase.assumeFail(sprintf( ...";
-                    buf(end+1,1) = string(sprintf( ...
-                        '                    ''%s smoke threw (stateful class, prelude best-effort): %%s'', ME.message));', ...
-                        fcn.Name));
+                    if wrapStateful
+                        buf(end+1,1) = string(sprintf( ...
+                            '                    ''%s smoke threw (stateful class, prelude best-effort): %%s'', ME.message));', ...
+                            fcn.Name));
+                    else
+                        buf(end+1,1) = string(sprintf( ...
+                            '                    ''%s smoke threw (fixture-driven, FixtureProvider best-effort): %%s'', ME.message));', ...
+                            fcn.Name));
+                    end
                     buf(end+1,1) = "            end";
                 end
             end
@@ -717,6 +748,14 @@ classdef TestWriter < handle
                     break;
                 end
                 if autotest.InputSampler.isOpaqueType(typedCheck{k}, inputsCheck{k})
+                    % Phase 12: DOM args have a fixture (tempDOM), so
+                    % they're no longer "opaque-blocking" for the
+                    % randomized layer.  Other opaque types still
+                    % short-circuit to testSkipped_random_<name>.
+                    if autotest.InputSampler.isDOMName(inputsCheck{k}) ...
+                            || autotest.InputSampler.isDOMType(typedCheck{k})
+                        continue;
+                    end
                     anyOpaque = true;
                     break;
                 end
@@ -759,11 +798,25 @@ classdef TestWriter < handle
             % rather than rethrow (Failed) -- consistent with the
             % stateful-smoke wrapper, and keeps the Failed metric a
             % trustworthy real-signal indicator.
-            if obj.Model.IsStateful && strcmp(kind, 'method')
+            % Phase 12: also relax-to-assumeFail when the random call
+            % uses a fixture (tempDOM, tempFileID).  Same rationale as
+            % the stateful case -- the autogen synthesised the args,
+            % so a non-validation throw is most likely a missing
+            % real-world dependency rather than a real bug.
+            randFixtureWrap = ~isempty(strfind(callExpr, 'autotest.InputSampler.tempDOM(testCase)')) ...
+                || ~isempty(strfind(callExpr, 'autotest.InputSampler.tempFileID(testCase)'));
+            randStatefulWrap = obj.Model.IsStateful && strcmp(kind, 'method');
+            if randStatefulWrap || randFixtureWrap
                 buf(end+1,1) = "                    if ~testCase.isValidationError(ME)";
-                buf(end+1,1) = string(sprintf( ...
-                    '                        testCase.assumeFail(sprintf(''%s randomized threw (stateful class, prelude best-effort): %%s'', ME.message));', ...
-                        fcn.Name));
+                if randStatefulWrap
+                    buf(end+1,1) = string(sprintf( ...
+                        '                        testCase.assumeFail(sprintf(''%s randomized threw (stateful class, prelude best-effort): %%s'', ME.message));', ...
+                            fcn.Name));
+                else
+                    buf(end+1,1) = string(sprintf( ...
+                        '                        testCase.assumeFail(sprintf(''%s randomized threw (fixture-driven, FixtureProvider best-effort): %%s'', ME.message));', ...
+                            fcn.Name));
+                end
                 buf(end+1,1) = "                        return;";
                 buf(end+1,1) = "                    end";
             else
@@ -1199,6 +1252,14 @@ classdef TestWriter < handle
                 % crashing on fprintf with a numeric "fileID".
                 if autotest.InputSampler.isFileIDName(inputs{k})
                     parts(end+1,1) = string(autotest.InputSampler.fileIDExpr()); %#ok<AGROW>
+                    continue;
+                end
+                % Phase 12: DOM-named/typed args -> real in-memory DOM,
+                % regardless of declared type.  Stops the randomized
+                % layer from piping rand() into Java DOM APIs.
+                if autotest.InputSampler.isDOMName(inputs{k}) ...
+                        || (k <= numel(typed) && autotest.InputSampler.isDOMType(typed{k}))
+                    parts(end+1,1) = string(autotest.InputSampler.domExpr()); %#ok<AGROW>
                     continue;
                 end
                 tyLow = '';
