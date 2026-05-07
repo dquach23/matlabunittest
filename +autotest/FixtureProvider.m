@@ -89,6 +89,28 @@ classdef FixtureProvider < handle
                 return;
             end
 
+            % --- Phase 14 (candidate 3): typed table / cell fixtures -----
+            % When an `arguments` block declares an arg as `table` or
+            % `cell`, build a small synthetic value of that shape.
+            % Default InputSampler.scalarFor returns `1` (table) or
+            % `{1}` (cell), neither of which matches what spreadsheet
+            % utility code expects.  Gated on argInfo.IsExplicit so
+            % this is dormant when no `arguments` block is present.
+            if isfield(argInfo, 'IsExplicit') && argInfo.IsExplicit
+                if strcmp(ltype, 'table')
+                    expr = 'table([1;2;3], ["a";"b";"c"], ''VariableNames'', {''N'', ''S''})';
+                    return;
+                end
+                if strcmp(ltype, 'cell')
+                    % cell-of-cells matrix (2x2) suits MATLAB
+                    % conventions for spreadsheet-style data better
+                    % than the {1, 2, 3} vector InputSampler.vectorFor
+                    % would emit.
+                    expr = '{1, ''a''; 2, ''b''}';
+                    return;
+                end
+            end
+
             % --- Stringy name-only heuristics (message/text/title/...) ----
             % Phase 13: extend the exact-name list with common composite
             % suffixes (titleText, headerText, subtitle) so callers like
@@ -208,6 +230,30 @@ classdef FixtureProvider < handle
                         || contains(lname, 'logfile') ...
                         || strcmp(lname, 'filepath'))
                 expr = 'tempname()';
+                return;
+            end
+
+            % --- Phase 14 (candidate 1): unzipped-Excel staging fixture -
+            % When an arg looks like an unzip / staging directory AND
+            % the project supplies a primary .xlsx fixture, return an
+            % expression that unzips that workbook into a temp dir at
+            % test time.  This is the constructor-graph fixture: a
+            % class whose constructor takes a path-like dir AND has a
+            % zero-arg sibling populator (loadAllDOMs/buildLookupMaps)
+            % that fills internal Map/dictionary state from files on
+            % disk.  Without a real populated dir, the populator's
+            % try/catch silently swallows the read failure and maps
+            % stay empty, cascading into Incomplete on every method
+            % that touches them.
+            % Dormant on projects with no .xlsx files (PrimaryExcel
+            % empty); falls through to the bare tempname() path below.
+            if stringyOrUnknown ...
+                    && ~isempty(obj.PrimaryExcel) ...
+                    && (contains(lname, 'unzip') ...
+                        || contains(lname, 'stagingdir'))
+                expr = sprintf( ...
+                    'autotest.InputSampler.tempUnzippedExcel(testCase, %s)', ...
+                    obj.charLiteral(obj.PrimaryExcel));
                 return;
             end
 

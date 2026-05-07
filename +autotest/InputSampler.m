@@ -216,6 +216,56 @@ classdef InputSampler
             end
         end
 
+        function dirPath = tempUnzippedExcel(testCase, sourceXlsx)
+            %TEMPUNZIPPEDEXCEL  Unzip an .xlsx into a tempdir; auto-cleans.
+            %
+            %   Phase 14 (candidate 1): backs the unzipped-Excel
+            %   staging fixture.  When a class constructor takes an
+            %   unzip / staging dir AND the project supplies a
+            %   primary .xlsx, this helper provides a real populated
+            %   directory at test time so downstream populator
+            %   methods (loadAllDOMs / buildLookupMaps) actually
+            %   populate the instance state instead of silently
+            %   no-opping inside the prelude's try/catch.
+            %
+            %   Returns the path of the unzipped directory.  A
+            %   teardown is registered to remove the temp dir when
+            %   the test method ends.  If the source file is
+            %   missing or unreadable, returns a bare tempname()
+            %   (matches existing fallback behaviour) so the
+            %   prelude's try/catch still short-circuits cleanly.
+            if nargin < 2 || isempty(sourceXlsx) ...
+                    || ~exist(sourceXlsx, 'file')
+                dirPath = tempname();
+                return;
+            end
+            dirPath = tempname();
+            try
+                unzip(sourceXlsx, dirPath);
+            catch
+                % Source isn't a real Zip-format file (or unreadable).
+                % Make sure dirPath at least exists so callers do not
+                % crash on isfolder() checks downstream.
+                try
+                    if ~isfolder(dirPath), mkdir(dirPath); end
+                catch
+                end
+                return;
+            end
+            testCase.addTeardown(@() autotest.InputSampler.cleanupTempDir(dirPath));
+        end
+
+        function cleanupTempDir(dirPath)
+            %CLEANUPTEMPDIR  Best-effort recursive removal of a tempdir.
+            %   Phase 14 (candidate 1) teardown helper for tempUnzippedExcel.
+            try
+                if ~isempty(dirPath) && isfolder(dirPath)
+                    rmdir(dirPath, 's');
+                end
+            catch
+            end
+        end
+
         function tf = isDOMName(argName)
             %ISDOMNAME  True if argName looks like an XML DOM handle.
             %   Phase 12: name-based detection so functions taking a
