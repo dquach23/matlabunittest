@@ -34,6 +34,11 @@ function info = runWorkflow(folder, varargin)
     p.addRequired('folder', @(x) (ischar(x) || isstring(x)) && ~isempty(char(x)));
     p.addParameter('OutputRoot', '', @(x) ischar(x) || isstring(x));
     p.addParameter('Verbose', false, @islogical);
+    % Phase 15: auto-render the native system test report
+    % (autotest.generateSystemTestReport) immediately after the JUnit
+    % summary is emitted.  Default OFF to preserve existing callers.
+    p.addParameter('GenerateReport', false, @islogical);
+    p.addParameter('ReportOptions',  struct(), @isstruct);
     p.parse(folder, varargin{:});
     r = p.Results;
 
@@ -202,6 +207,48 @@ function info = runWorkflow(folder, varargin)
     catch ME
         warning('autotest:ReportRenderer', ...
             'Polished report rendering failed: %s', ME.message);
+    end
+
+    % ── Phase 15: native MATLAB system-test-report generator ─────────────
+    % When 'GenerateReport' is true, build a full Word-format system test
+    % report under <reportsDir> via autotest.generateSystemTestReport.
+    % The function selects between mlreportgen.dom (when licensed) and a
+    % hand-rolled OOXML emitter (built-ins only); see report_backend.log.
+    if r.GenerateReport
+        try
+            ropts = r.ReportOptions;
+            cellArgs = {};
+            if isstruct(ropts)
+                f = fieldnames(ropts);
+                for k = 1:numel(f)
+                    cellArgs{end+1} = f{k}; %#ok<AGROW>
+                    cellArgs{end+1} = ropts.(f{k}); %#ok<AGROW>
+                end
+            end
+            reportInfo = autotest.generateSystemTestReport(folder, cellArgs{:});
+            info.ReportDocxPath = reportInfo.DocxPath;
+            info.ReportPdfPath  = reportInfo.PdfPath;
+            info.ReportBackend  = reportInfo.BackendDisplay;
+            % v1.3 Part B item 3: surface the audit sidecar path so
+            % callers can `disp(info.AuditSidecar)` after a workflow
+            % run.  ReportBuilder.build already writes the sidecar;
+            % this is just the wiring fix.
+            if isfield(reportInfo, 'AuditSidecar')
+                info.AuditSidecar = reportInfo.AuditSidecar;
+            else
+                info.AuditSidecar = '';
+            end
+            fprintf('Wrote %s (backend: %s)\n', reportInfo.DocxPath, reportInfo.BackendDisplay);
+            if ~isempty(reportInfo.PdfPath)
+                fprintf('Wrote %s\n', reportInfo.PdfPath);
+            end
+            if ~isempty(info.AuditSidecar)
+                fprintf('Wrote %s\n', info.AuditSidecar);
+            end
+        catch ME
+            warning('autotest:GenerateReport', ...
+                'Native report generation failed: %s', ME.message);
+        end
     end
 end
 

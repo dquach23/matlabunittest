@@ -1357,6 +1357,34 @@ classdef TestWriter < handle
                 if k <= numel(typed) && isfield(typed{k}, 'Type')
                     tyLow = lower(strtrim(char(typed{k}.Type)));
                 end
+                % v1.3 cand 2: scalar-shaped name detection.  When the
+                % arg name is conventionally a scalar coordinate
+                % (col/row/index/sheetnumber/start*/end*) and no
+                % explicit type pinned a different shape, emit a scalar
+                % randi(10) instead of a vector rand(1, randi(5)).
+                % Stops the randomized layer from feeding a vector to a
+                % colon endpoint or array index.  Generic across MATLAB
+                % projects; pure name match.
+                lname = lower(strtrim(inputs{k}));
+                isExplicit = (k <= numel(typed)) && isfield(typed{k}, 'IsExplicit') && typed{k}.IsExplicit;
+                isNumericish = isempty(tyLow) || any(strcmp(tyLow, {'double','single','numeric'}));
+                if ~isExplicit && isNumericish && ...
+                        (contains(lname, 'col') || contains(lname, 'row') || ...
+                         contains(lname, 'index') || contains(lname, 'sheetnumber') || ...
+                         strcmp(lname, 'startcol') || strcmp(lname, 'endcol') || ...
+                         strcmp(lname, 'startrow') || strcmp(lname, 'endrow'))
+                    parts(end+1,1) = "randi(10)"; %#ok<AGROW>
+                    continue;
+                end
+                % v1.3 cand 2: respect MustBeFinite / MustBePositive on
+                % the randomized layer.  rand(1,n) is already in (0,1),
+                % which is positive and finite -- no change needed for
+                % default doubles.  When the project explicitly demands
+                % positive integers, switch to randi(10, 1, randi(5))
+                % so 0/negatives never appear.
+                hasMustBeFinite   = (k <= numel(typed)) && isfield(typed{k}, 'MustBeFinite')   && typed{k}.MustBeFinite;
+                hasMustBePositive = (k <= numel(typed)) && isfield(typed{k}, 'MustBePositive') && typed{k}.MustBePositive;
+                hasMustBeNonempty = (k <= numel(typed)) && isfield(typed{k}, 'MustBeNonempty') && typed{k}.MustBeNonempty; %#ok<NASGU>
                 switch tyLow
                     case {'string'}
                         parts(end+1,1) = "string(char(double('a') + randi(25, 1, randi(5))))"; %#ok<AGROW>
@@ -1367,7 +1395,14 @@ classdef TestWriter < handle
                     case {'logical'}
                         parts(end+1,1) = "logical(randi([0 1], 1, randi(5)))"; %#ok<AGROW>
                     otherwise
-                        parts(end+1,1) = "rand(1, randi(5))"; %#ok<AGROW>
+                        if hasMustBePositive
+                            parts(end+1,1) = "randi(10, 1, randi(5))"; %#ok<AGROW>
+                        elseif hasMustBeFinite
+                            % rand(1,n) already in (0,1); leave default.
+                            parts(end+1,1) = "rand(1, randi(5))"; %#ok<AGROW>
+                        else
+                            parts(end+1,1) = "rand(1, randi(5))"; %#ok<AGROW>
+                        end
                 end
             end
             if isempty(parts)

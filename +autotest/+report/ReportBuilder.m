@@ -89,6 +89,21 @@ classdef ReportBuilder
             autotest.report.SectionBuilder.emit(backend, ctx);
             backend.close();
 
+            % v1.3 Part B item 2: self-attesting embedded sha256.
+            % SectionBuilder.appendixE wrote the sentinel
+            % `__DOCX_SHA256_SLOT__` into Appendix E.5; now that the
+            % .docx is on disk, compute its sha256, unzip, substitute
+            % the sentinel for the hex, and re-zip.  The inline value
+            % is the pre-substitution hash; reviewers can verify it
+            % by reverting the substitution.  Best-effort: failures
+            % are non-fatal -- the sentinel just stays in the
+            % document and the sidecar still carries the
+            % post-substitution hash.
+            try
+                autotest.report.ReportBuilder.embedSelfChecksum(docxPath);
+            catch
+            end
+
             % Render PDF if requested.
             generatedPdfPath = '';
             if ~strcmpi(opts.PdfBackend, 'none')
@@ -198,13 +213,13 @@ classdef ReportBuilder
             fid = fopen(path, 'w');
             if fid < 3, return; end
             cleanup = onCleanup(@() fclose(fid));
-            fprintf(fid, 'matlabunittest -- Phase 16 Audit Trail Sidecar\n');
-            fprintf(fid, '================================================\n\n');
+            fprintf(fid, 'matlabunittest -- Audit Trail Sidecar\n');
+            fprintf(fid, '======================================\n\n');
             fprintf(fid, 'matlabunittest commit hash: %s\n', audit.CommitHash);
             fprintf(fid, 'matlabunittest tree clean:  %s\n', audit.TreeClean);
             fprintf(fid, 'Test-cycle timestamp:       %s\n', audit.CycleTimestamp);
             fprintf(fid, 'Report build time:          %s\n', audit.BuiltAt);
-            fprintf(fid, 'Phase 16 verification:      %s\n', audit.PhaseStatus);
+            fprintf(fid, 'Verification status:        %s\n', audit.PhaseStatus);
             fprintf(fid, 'Generated tests passed:     %s\n', audit.PassCount);
             fprintf(fid, 'Generated tests failed:     %s\n', audit.FailCount);
             fprintf(fid, 'Generated tests incomplete: %s\n', audit.IncCount);
@@ -231,6 +246,104 @@ classdef ReportBuilder
                 entry = sprintf('(unavailable) %s', path);
             else
                 entry = sprintf('%s  %s', hash, path);
+            end
+        end
+
+        function preHash = embedSelfChecksum(docxPath)
+            %EMBEDSELFCHECKSUM  v1.3 Part B item 2 -- two-pass self-attestation.
+            %
+            %   SectionBuilder.appendixE writes the sentinel
+            %   `__DOCX_SHA256_SLOT__` into Appendix E.5.  After the
+            %   .docx is closed, unzip into a temp stage, compute the
+            %   sha256 of `word/document.xml` AS WRITTEN (with the
+            %   sentinel still in place); this is `preHash`.  Replace
+            %   the sentinel inside the file with `preHash`, re-zip.
+            %   The inline hex is the pre-substitution content hash
+            %   so a reviewer can:
+            %     1. unzip the .docx, read `word/document.xml`
+            %     2. extract the 64-char hex in Appendix E.5
+            %     3. substitute the hex back to the literal string
+            %        `__DOCX_SHA256_SLOT__`
+            %     4. sha256 the resulting file -- it must equal the
+            %        extracted hex
+            %   This proves the inline hex is a genuine hash of the
+            %   document content as the autogen wrote it.  The hash
+            %   is over `word/document.xml` (the content) rather than
+            %   over the .docx zip (the wrapper) so it is robust to
+            %   MATLAB's non-deterministic zip metadata (timestamps,
+            %   order); only the actual content matters.
+            %
+            %   Returns the embedded hash; empty on failure.
+            preHash = '';
+            if ~isfile(docxPath), return; end
+            tmpStage = tempname();
+            mkdir(tmpStage);
+            cleanup = onCleanup(@() ...
+                autotest.report.ReportBuilder.tryRmdir(tmpStage)); %#ok<NASGU>
+            try
+                unzip(docxPath, tmpStage);
+            catch
+                return;
+            end
+            docXml = fullfile(tmpStage, 'word', 'document.xml');
+            if ~isfile(docXml), return; end
+            raw = fileread(docXml);
+            if ~contains(raw, '__DOCX_SHA256_SLOT__')
+                % Sentinel absent -- nothing to embed.
+                return;
+            end
+            % Compute sha256 over the file as written (sentinel intact).
+            preHash = autotest.report.ReportBuilder.sha256OfFile(docXml);
+            if isempty(preHash), return; end
+            % Substitute the sentinel for the hash.
+            patched = strrep(raw, '__DOCX_SHA256_SLOT__', preHash);
+            fid = fopen(docXml, 'w');
+            if fid < 3
+                preHash = '';
+                return;
+            end
+            fwrite(fid, unicode2native(patched, 'UTF-8'));
+            fclose(fid);
+            % Re-zip back to the original docxPath.
+            tmpZip = [tempname() '.zip'];
+            files = autotest.report.ReportBuilder.listStageFiles(tmpStage);
+            origDir = pwd;
+            try
+                cd(tmpStage);
+                zip(tmpZip, files);
+                cd(origDir);
+            catch innerME
+                try, cd(origDir); catch, end
+                preHash = '';
+                rethrow(innerME);
+            end
+            try
+                if isfile(docxPath), delete(docxPath); end
+                movefile(tmpZip, docxPath, 'f');
+            catch
+                preHash = '';
+                return;
+            end
+        end
+
+        function tryRmdir(p)
+            try
+                if ~isempty(p) && isfolder(p)
+                    rmdir(p, 's');
+                end
+            catch
+            end
+        end
+
+        function files = listStageFiles(stageDir)
+            files = {};
+            list = dir(fullfile(stageDir, '**', '*'));
+            for i = 1:numel(list)
+                d = list(i);
+                if d.isdir, continue; end
+                full = fullfile(d.folder, d.name);
+                rel = strrep(full, [stageDir filesep], '');
+                files{end+1} = rel; %#ok<AGROW>
             end
         end
 

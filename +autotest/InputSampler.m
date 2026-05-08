@@ -545,9 +545,20 @@ classdef InputSampler
             % (Type='double') was never overridden.  Used by the name-driven
             % string override below so callers who explicitly typed an arg
             % as `double` aren't silently re-typed as string.
+            % v1.3 cand 2: per-arg constraint flags pulled from
+            % validator slots.  Each is dormant unless the corresponding
+            % validator appears in the arguments-block row.  Consumers
+            % (FixtureProvider, edgeFor, randomArgsExpr) honour them so
+            % the autogen synthesises values that satisfy validation on
+            % the first call.
             typed = repmat({struct('Type','double','SizeHint','any', ...
                 'Validators',{{}}, 'IsExplicit', false, ...
-                'MustBeMember', {{}})}, 1, numel(inputs));
+                'MustBeMember', {{}}, ...
+                'MustBeNonempty', false, ...
+                'MustBeFinite',   false, ...
+                'MustBeReal',     false, ...
+                'MustBePositive', false, ...
+                'MustBeText',     false)}, 1, numel(inputs));
             if ~isempty(argBlocks)
                 for b = 1:numel(argBlocks)
                     rows = argBlocks{b};
@@ -590,6 +601,37 @@ classdef InputSampler
                             if ~isempty(mbmList)
                                 info.MustBeMember = mbmList;
                             end
+                            % v1.3 cand 2: pull the other common single-
+                            % constraint validators (mustBeNonempty,
+                            % mustBeFinite, mustBeReal, mustBePositive,
+                            % mustBeText / mustBeTextScalar).  Each maps
+                            % to a boolean flag honoured by
+                            % FixtureProvider, edgeFor, and randomArgsExpr.
+                            % Generic across MATLAB projects.
+                            if autotest.InputSampler.hasValidator(vl, 'mustBeNonempty')
+                                info.MustBeNonempty = true;
+                            end
+                            if autotest.InputSampler.hasValidator(vl, 'mustBeFinite')
+                                info.MustBeFinite = true;
+                            end
+                            if autotest.InputSampler.hasValidator(vl, 'mustBeReal')
+                                info.MustBeReal = true;
+                            end
+                            if autotest.InputSampler.hasValidator(vl, 'mustBePositive')
+                                info.MustBePositive = true;
+                            end
+                            if autotest.InputSampler.hasValidator(vl, 'mustBeText') ...
+                                    || autotest.InputSampler.hasValidator(vl, 'mustBeTextScalar') ...
+                                    || autotest.InputSampler.hasValidator(vl, 'mustBeNonzeroLengthText')
+                                info.MustBeText = true;
+                                % If the row didn't otherwise set a Type,
+                                % surface it as string so randomArgsExpr
+                                % and scalarFor pick the string ladder.
+                                tyLow = lower(strtrim(char(info.Type)));
+                                if isempty(tyLow) || strcmp(tyLow, 'double')
+                                    info.Type = 'string';
+                                end
+                            end
                         end
                         typed{idx} = info;
                     end
@@ -607,6 +649,14 @@ classdef InputSampler
                 'text', 'originaltext', 'pattern', 'format', 'name', ...
                 'message', 'msg', 'str', 'string', 'title', ...
                 'caption', 'header', 'label', 'word'};
+            % v1.3 cand 2: composite-name suffix list parity with
+            % FixtureProvider.literalForArg.  Stops randomArgsExpr from
+            % piping rand() into a downstream `strlength(arg)` /
+            % `regexp(arg)` chain when the arg is named with a
+            % conventional stringy suffix.  Generic across MATLAB
+            % projects; pure name match.
+            stringySuffixes = {'titletext', 'headertext', 'subtitle', ...
+                'text', 'message', 'name', 'string', 'label', 'caption'};
             for k = 1:numel(inputs)
                 info = typed{k};
                 if isfield(info, 'IsExplicit') && info.IsExplicit
@@ -620,6 +670,21 @@ classdef InputSampler
                 if any(strcmp(lname, stringyNames))
                     info.Type = 'string';
                     typed{k} = info;
+                    continue;
+                end
+                % v1.3 cand 2: composite stringy-suffix match.  Length
+                % gate (>=5) avoids spuriously promoting short identifiers.
+                if length(lname) >= 5
+                    matched = false;
+                    for s = 1:numel(stringySuffixes)
+                        if endsWith(lname, stringySuffixes{s})
+                            matched = true; break;
+                        end
+                    end
+                    if matched
+                        info.Type = 'string';
+                        typed{k} = info;
+                    end
                 end
             end
         end
@@ -737,11 +802,66 @@ classdef InputSampler
                 otherwise
                     edges = autotest.InputSampler.appendEdge(edges, 'empty', '[]');
             end
+            % v1.3 cand 2: filter edges that the declared validators
+            % guarantee to fail on the first call.  These are not
+            % real signal -- the project's argument validation rejects
+            % them before any business logic runs -- so they pollute
+            % the report without exercising the function.
+            if isstruct(t)
+                edges = autotest.InputSampler.filterEdgesByValidators(edges, t);
+            end
+        end
+
+        function out = filterEdgesByValidators(edges, t)
+            %FILTEREDGESBYVALIDATORS  Drop edges that the validators reject upfront.
+            %
+            %   v1.3 cand 2.  When an `arguments` block declares
+            %   mustBeNonempty / mustBeFinite / mustBePositive (etc.)
+            %   on an arg, the project rejects the corresponding edge
+            %   value (empty / NaN / Inf / 0 / -1) before any business
+            %   logic runs.  Filtering them here keeps the edge ladder
+            %   honest -- only edges the function actually has a
+            %   chance of processing remain.  Generic across MATLAB
+            %   projects; dormant when no validators are declared.
+            out = edges;
+            if isempty(out), return; end
+            keep = true(1, numel(out));
+            for k = 1:numel(out)
+                lbl = lower(out(k).Label);
+                if isfield(t, 'MustBeNonempty') && t.MustBeNonempty
+                    if strcmp(lbl, 'empty'), keep(k) = false; continue; end
+                end
+                if isfield(t, 'MustBeFinite') && t.MustBeFinite
+                    if any(strcmp(lbl, {'nan','inf','missing'})), keep(k) = false; continue; end
+                end
+                if isfield(t, 'MustBePositive') && t.MustBePositive
+                    if any(strcmp(lbl, {'zero','neg'})), keep(k) = false; continue; end
+                end
+            end
+            out = out(keep);
         end
 
         function edges = appendEdge(edges, label, expr)
             edges(end+1).Label = label; %#ok<AGROW>
             edges(end).Expr = expr;
+        end
+
+        function tf = hasValidator(validatorsBraces, validatorName)
+            %HASVALIDATOR  True iff `validatorsBraces` carries a call to VALIDATORNAME.
+            %
+            %   v1.3 cand 2 helper.  Detects single-constraint
+            %   validators (e.g. mustBeNonempty, mustBeFinite,
+            %   mustBeReal, mustBePositive, mustBeText) inside an
+            %   arguments-block validators slot.  Whitespace and
+            %   case (on the `(` only) are tolerated; the validator
+            %   name itself is matched case-sensitively.
+            tf = false;
+            if isempty(validatorsBraces) || isempty(validatorName), return; end
+            v = char(validatorsBraces);
+            % Use word boundary + open paren to avoid prefix matches
+            % (e.g. mustBeNonempty matching mustBeNonemptyOrThrow).
+            pat = ['\<' regexptranslate('escape', validatorName) '\s*\('];
+            tf = ~isempty(regexp(v, pat, 'once'));
         end
 
         function vals = parseMustBeMember(validatorsBraces)
