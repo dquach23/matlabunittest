@@ -753,26 +753,54 @@ classdef MFileParser < handle
         end
 
         function [block, nextIdx] = collectExampleBlock(lines, startIdx)
+            % Phase 16 (cand-5): tolerate multi-line bodies with internal
+            % blank lines.  Termination conditions:
+            %   1. Recognised help-section heading (See also:, Inputs:,
+            %      Outputs:, Notes:, Arguments:, Returns:, Description:).
+            %   2. Two consecutive blank lines (paragraph break).
+            %   3. Single blank followed by an unindented non-heading
+            %      (heuristic: the body has ended even though the next
+            %      line isn't a recognised heading -- this is what
+            %      `% See also: foo` (no colon-suffix) and freeform
+            %      footers look like in the wild).
+            % Indented (2+ spaces) lines are continuation of the body
+            % regardless of intervening single blanks.  The buffer
+            % preserves the trimmed body so runExample(text) evaluates
+            % cleanly.
             buf = strings(0,1);
             i = startIdx;
-            while i <= numel(lines)
+            n = numel(lines);
+            blankRun = 0;
+            while i <= n
                 ln = lines{i};
                 trimmed = strtrim(ln);
                 if isempty(trimmed)
-                    % Blank line after content terminates the block; a
-                    % blank line before any content is just leading
-                    % whitespace and should be skipped.
-                    if ~isempty(buf), break; end
+                    blankRun = blankRun + 1;
+                    if isempty(buf)
+                        i = i + 1;
+                        continue;
+                    end
+                    if blankRun >= 2
+                        break;
+                    end
                     i = i + 1;
                     continue;
                 end
-                % A new help section header (See also:, Example:) ends the
-                % block as well.
-                if ~isempty(regexpi(trimmed, '^see also[:.]', 'once')) ...
-                        || ~isempty(regexpi(trimmed, '^example[s]?\s*[:.]?\s*$', 'once'))
+                if autotest.MFileParser.isHelpSectionHeading(trimmed)
                     break;
                 end
+                if blankRun == 1 && (length(ln) < 2 || ~strncmp(ln, '  ', 2))
+                    % Single blank followed by an unindented non-heading
+                    % is treated as the start of a new paragraph and
+                    % ends the body.  Conservative: indent-aware
+                    % MATLAB help follows this convention reliably.
+                    break;
+                end
+                if blankRun > 0
+                    buf(end+1,1) = ""; %#ok<AGROW>
+                end
                 buf(end+1,1) = string(trimmed); %#ok<AGROW>
+                blankRun = 0;
                 i = i + 1;
             end
             if isempty(buf)
@@ -781,6 +809,24 @@ classdef MFileParser < handle
                 block = char(strjoin(buf, newline));
             end
             nextIdx = i;
+        end
+
+        function tf = isHelpSectionHeading(trimmed)
+            % Phase 16 (cand-5) helper.  Recognise the conventional
+            % MATLAB help-text section headings that terminate an
+            % Example: body.  Generic across MATLAB projects.
+            tf = ~isempty(regexpi(trimmed, '^see also[:.]', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^example[s]?\s*[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^example[s]?\s*:\s*\S', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^inputs?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^outputs?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^input\s+arguments?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^output\s+arguments?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^returns?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^notes?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^arguments?[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^description[:.]?\s*$', 'once')) ...
+                || ~isempty(regexpi(trimmed, '^syntax[:.]?\s*$', 'once'));
         end
 
         function tf = isNamedContainerEmpty(rhs)

@@ -266,6 +266,111 @@ classdef InputSampler
             end
         end
 
+        function key = firstKeyOr(container, fallback)
+            %FIRSTKEYOR  First key/index of a populated container, or FALLBACK.
+            %
+            %   Phase 15 (candidate 1): backs the live-state-aware smoke
+            %   substitution.  When the prelude has populated a
+            %   containers.Map / dictionary / struct / cell / table
+            %   property, this returns a real key that exists in the live
+            %   state, so smokes operate against actual data rather than a
+            %   synthetic literal that the project's validation rejects.
+            %
+            %   When the container is empty or its shape is unrecognised,
+            %   returns the FALLBACK literal verbatim (all-or-nothing
+            %   safety: do NOT throw).  Generic across MATLAB projects:
+            %   recognises only built-in container shapes.
+            key = fallback;
+            try
+                if isa(container, 'containers.Map')
+                    k = keys(container);
+                    if ~isempty(k)
+                        v = k{1};
+                        if isstring(v), v = char(v); end
+                        key = v;
+                    end
+                elseif isa(container, 'dictionary')
+                    if numEntries(container) > 0
+                        ks = keys(container);
+                        if isstring(ks) && ~isempty(ks)
+                            key = char(ks(1));
+                        elseif iscell(ks) && ~isempty(ks)
+                            v = ks{1};
+                            if isstring(v), v = char(v); end
+                            key = v;
+                        elseif isnumeric(ks) && ~isempty(ks)
+                            key = ks(1);
+                        end
+                    end
+                elseif isstruct(container) && ~isempty(container)
+                    f = fieldnames(container);
+                    if ~isempty(f)
+                        key = f{1};
+                    end
+                elseif iscell(container) && ~isempty(container)
+                    v = container{1};
+                    if ischar(v) || isstring(v)
+                        key = char(v);
+                    end
+                elseif istable(container)
+                    n = container.Properties.VariableNames;
+                    if ~isempty(n)
+                        key = n{1};
+                    end
+                end
+            catch
+                % Fall through to fallback.
+            end
+        end
+
+        function val = firstValueOr(container, fallback)
+            %FIRSTVALUEOR  First value of a populated container, or FALLBACK.
+            %
+            %   Phase 16 (candidate 2): backs the live-state-aware VALUE
+            %   substitution.  Symmetric to firstKeyOr but returns the
+            %   first VALUE entry of a populated containers.Map /
+            %   dictionary / struct / cell / table, so smokes whose
+            %   value-shaped arg matches a sibling container property
+            %   operate against actual data rather than a synthetic
+            %   literal that the project's validation rejects.
+            %
+            %   When the container is empty or its shape is unrecognised,
+            %   returns the FALLBACK literal verbatim (all-or-nothing
+            %   safety: do NOT throw).  Generic across MATLAB projects:
+            %   recognises only built-in container shapes.
+            val = fallback;
+            try
+                if isa(container, 'containers.Map')
+                    if container.Count > 0
+                        ks = keys(container);
+                        val = container(ks{1});
+                    end
+                elseif isa(container, 'dictionary')
+                    if numEntries(container) > 0
+                        ks = keys(container);
+                        if isstring(ks) && ~isempty(ks)
+                            val = container(ks(1));
+                        elseif iscell(ks) && ~isempty(ks)
+                            val = container(ks{1});
+                        elseif isnumeric(ks) && ~isempty(ks)
+                            val = container(ks(1));
+                        end
+                    end
+                elseif isstruct(container) && ~isempty(container)
+                    f = fieldnames(container);
+                    if ~isempty(f)
+                        val = container.(f{1});
+                    end
+                elseif iscell(container) && ~isempty(container)
+                    val = container{1};
+                elseif istable(container) && height(container) > 0
+                    val = container(1, :);
+                end
+            catch
+                % Fall through to fallback.
+            end
+        end
+
         function tf = isDOMName(argName)
             %ISDOMNAME  True if argName looks like an XML DOM handle.
             %   Phase 12: name-based detection so functions taking a
@@ -441,7 +546,8 @@ classdef InputSampler
             % string override below so callers who explicitly typed an arg
             % as `double` aren't silently re-typed as string.
             typed = repmat({struct('Type','double','SizeHint','any', ...
-                'Validators',{{}}, 'IsExplicit', false)}, 1, numel(inputs));
+                'Validators',{{}}, 'IsExplicit', false, ...
+                'MustBeMember', {{}})}, 1, numel(inputs));
             if ~isempty(argBlocks)
                 for b = 1:numel(argBlocks)
                     rows = argBlocks{b};
@@ -472,6 +578,18 @@ classdef InputSampler
                         end
                         if ~isempty(vl)
                             info.Validators = strsplit(strtrim(vl(2:end-1)), ',');
+                            % Phase 16 cand-4: mustBeMember(arg, list) pull.
+                            % The list is one of: string array literal
+                            % ("a","b"), cellstr literal ('a','b'), or
+                            % numeric array literal ([1 2 3]).  Symbol
+                            % references (a const name) yield {} so the
+                            % consumer falls through to the synthetic
+                            % default.  Generic across MATLAB projects;
+                            % no project-specific knowledge.
+                            mbmList = autotest.InputSampler.parseMustBeMember(vl);
+                            if ~isempty(mbmList)
+                                info.MustBeMember = mbmList;
+                            end
                         end
                         typed{idx} = info;
                     end
@@ -624,6 +742,167 @@ classdef InputSampler
         function edges = appendEdge(edges, label, expr)
             edges(end+1).Label = label; %#ok<AGROW>
             edges(end).Expr = expr;
+        end
+
+        function vals = parseMustBeMember(validatorsBraces)
+            %PARSEMUSTBEMEMBER  Parse a mustBeMember validator's allowed list.
+            %
+            %   Phase 16 cand-4 helper.  Input is the raw `{...}` validator
+            %   slot text (including braces) captured from an `arguments`
+            %   block row.  Returns a cell array of bare allowed values
+            %   (chars for string/cellstr literals, numerics for numeric
+            %   arrays), OR an empty cell when:
+            %     - no mustBeMember validator is present
+            %     - the list is a symbol reference (a const name) that
+            %       cannot be resolved at parse time
+            %   Generic across MATLAB projects; no project-specific knowledge.
+            vals = {};
+            if isempty(validatorsBraces), return; end
+            v = char(validatorsBraces);
+            % Locate the mustBeMember(arg, LIST) call.  arg name not
+            % consulted -- the validator already binds it positionally to
+            % the arguments-block name.  Use a paren-balanced parse
+            % rather than a single regex so nested constructs in LIST
+            % don't trip up.
+            idx = regexp(v, 'mustBeMember\s*\(', 'once');
+            if isempty(idx), return; end
+            % Walk to the open paren.
+            openIdx = idx + find(v(idx:end) == '(', 1, 'first') - 1;
+            if isempty(openIdx) || openIdx <= idx, return; end
+            % Find the matching close paren.
+            depth = 1;
+            i = openIdx + 1;
+            inSingle = false; inDouble = false;
+            while i <= length(v) && depth > 0
+                ch = v(i);
+                if inDouble
+                    if ch == '"', inDouble = false; end
+                elseif inSingle
+                    if ch == '''', inSingle = false; end
+                else
+                    switch ch
+                        case '"', inDouble = true;
+                        case '''', inSingle = true;
+                        case '(', depth = depth + 1;
+                        case ')', depth = depth - 1;
+                    end
+                end
+                if depth == 0, break; end
+                i = i + 1;
+            end
+            if depth ~= 0, return; end
+            inner = strtrim(v(openIdx+1:i-1));
+            % Skip the first arg (the variable name) up to the comma at
+            % depth 0; what remains is the list expression.
+            depth = 0;
+            inSingle = false; inDouble = false;
+            commaIdx = 0;
+            for k = 1:length(inner)
+                ch = inner(k);
+                if inDouble
+                    if ch == '"', inDouble = false; end
+                elseif inSingle
+                    if ch == '''', inSingle = false; end
+                else
+                    switch ch
+                        case '"', inDouble = true;
+                        case '''', inSingle = true;
+                        case {'(','[','{'}, depth = depth + 1;
+                        case {')',']','}'}, depth = depth - 1;
+                        case ','
+                            if depth == 0, commaIdx = k; break; end
+                    end
+                end
+            end
+            if commaIdx == 0, return; end
+            listText = strtrim(inner(commaIdx+1:end));
+            if isempty(listText), return; end
+            vals = autotest.InputSampler.parseAllowedListLiteral(listText);
+        end
+
+        function vals = parseAllowedListLiteral(listText)
+            %PARSEALLOWEDLISTLITERAL  Convert literal list text to a cell array.
+            %
+            %   Recognises three forms:
+            %     ["a","b","c"]   string array  -> {'a','b','c'}
+            %     {'a','b','c'}   cellstr        -> {'a','b','c'}
+            %     [1 2 3]         numeric array  -> {1, 2, 3}
+            %   Anything else returns {}.
+            vals = {};
+            t = strtrim(char(listText));
+            if isempty(t), return; end
+            % String / numeric array form: [...]
+            if t(1) == '[' && t(end) == ']'
+                inner = strtrim(t(2:end-1));
+                if isempty(inner), return; end
+                if any(inner == '"')
+                    vals = autotest.InputSampler.scanQuoted(inner, '"');
+                    return;
+                end
+                if any(inner == '''')
+                    vals = autotest.InputSampler.scanQuoted(inner, '''');
+                    return;
+                end
+                % Numeric: split on whitespace or comma.
+                parts = regexp(inner, '[\s,]+', 'split');
+                parts(cellfun(@isempty, parts)) = [];
+                vals = cell(1, numel(parts));
+                ok = true;
+                for k = 1:numel(parts)
+                    n = str2double(parts{k});
+                    if isnan(n), ok = false; break; end
+                    vals{k} = n;
+                end
+                if ~ok, vals = {}; end
+                return;
+            end
+            % Cellstr form: {...}
+            if t(1) == '{' && t(end) == '}'
+                inner = strtrim(t(2:end-1));
+                if isempty(inner), return; end
+                if any(inner == '''')
+                    vals = autotest.InputSampler.scanQuoted(inner, '''');
+                    return;
+                end
+                if any(inner == '"')
+                    vals = autotest.InputSampler.scanQuoted(inner, '"');
+                    return;
+                end
+            end
+            % Bare symbol reference: cannot resolve at parse time.
+        end
+
+        function vals = scanQuoted(inner, q)
+            %SCANQUOTED  Extract every quoted run between Q delimiters.
+            %   Q is one of '"' or ''''.  Doubled-quote escapes are
+            %   collapsed (e.g. ''it''s'' -> 'it's').  Generic helper
+            %   for parseAllowedListLiteral.
+            vals = {};
+            i = 1;
+            n = length(inner);
+            while i <= n
+                if inner(i) ~= q
+                    i = i + 1;
+                    continue;
+                end
+                % Walk the quoted run, collapsing doubled quotes.
+                buf = '';
+                j = i + 1;
+                while j <= n
+                    if inner(j) == q
+                        if j + 1 <= n && inner(j+1) == q
+                            buf(end+1) = q; %#ok<AGROW>
+                            j = j + 2;
+                            continue;
+                        end
+                        break;
+                    end
+                    buf(end+1) = inner(j); %#ok<AGROW>
+                    j = j + 1;
+                end
+                vals{end+1} = buf; %#ok<AGROW>
+                i = j + 1;
+            end
         end
     end
 end

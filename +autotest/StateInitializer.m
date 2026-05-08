@@ -252,5 +252,102 @@ classdef StateInitializer
             end
             resolved = out;
         end
+
+        function expr = liveContainerExpr(propName, propType)
+            %LIVECONTAINEREXPR  Build a live-container smoke arg expression.
+            %
+            %   Phase 16 (candidate 1): emits `testCase.Instance.<propName>`
+            %   so the smoke uses the ENTIRE container property at runtime,
+            %   not a key into it.  Symmetric to liveKeyExpr but for the
+            %   case where a method's positional arg is the WHOLE
+            %   containers.Map / dictionary / table / struct that lives on
+            %   a sibling property of the same class -- e.g.
+            %       function rebuildSheet(obj, sheetMap)
+            %   with `properties; SheetMap; end` on the same class.
+            %
+            %   PROPNAME is the class property name (case-sensitive as
+            %   declared in the source file).  PROPTYPE is accepted for
+            %   parity with liveKeyExpr; not consulted at emission time
+            %   (the property's runtime shape carries the type).
+            %
+            %   Generic across MATLAB projects: detection at the call
+            %   site (TestWriter.applyContainerSubstitution) is purely
+            %   shape-and-name-based.
+            arguments
+                propName (1,:) char
+                propType (1,:) char = '' %#ok<INUSA>
+            end
+            expr = sprintf('testCase.Instance.%s', propName);
+        end
+
+        function expr = liveValueExpr(propName, propType, fallback)
+            %LIVEVALUEEXPR  Build a live-value smoke arg expression.
+            %
+            %   Phase 16 (candidate 2): emits a call expression
+            %       autotest.InputSampler.firstValueOr( ...
+            %           testCase.Instance.<propName>, <fallback>)
+            %   that the generated TestMethodSetup will resolve at
+            %   runtime.  When the prelude has populated the named
+            %   property (table / struct / cell), firstValueOr returns
+            %   the first VALUE entry; when it has not, it returns the
+            %   FALLBACK literal verbatim, so the smoke degrades
+            %   gracefully without throwing inside the prelude's
+            %   try/catch.
+            %
+            %   Symmetric to liveKeyExpr but for value-shaped args
+            %   (tableData, rowValue, recordPayload, etc.) where the
+            %   caller wants a SAMPLE entry rather than a KEY.
+            %
+            %   Generic across MATLAB projects: detection at runtime is
+            %   purely shape-based, no project-specific knowledge.
+            arguments
+                propName (1,:) char
+                propType (1,:) char = '' %#ok<INUSA>
+                fallback (1,:) char = ''''''
+            end
+            if isempty(fallback)
+                fallback = '''''';
+            end
+            expr = sprintf( ...
+                'autotest.InputSampler.firstValueOr(testCase.Instance.%s, %s)', ...
+                propName, fallback);
+        end
+
+        function expr = liveKeyExpr(propName, propType, fallback)
+            %LIVEKEYEXPR  Build a live-key smoke arg expression.
+            %
+            %   Phase 15 (candidate 1): emits a call expression
+            %       autotest.InputSampler.firstKeyOr( ...
+            %           testCase.Instance.<propName>, <fallback>)
+            %   that the generated TestMethodSetup will resolve at
+            %   runtime.  When the prelude has populated the named
+            %   property (containers.Map / dictionary / struct / cell
+            %   / table), firstKeyOr returns the first key/index;
+            %   when it has not, firstKeyOr returns the FALLBACK
+            %   literal verbatim, so the smoke degrades gracefully
+            %   without throwing inside the prelude's try/catch.
+            %
+            %   PROPNAME is the class property name (case-sensitive
+            %   as declared in the source file).  PROPTYPE is
+            %   accepted for parity with other emitters but is not
+            %   currently consulted -- firstKeyOr does its own
+            %   shape detection at runtime.  FALLBACK is the
+            %   synthetic literal expression to use when the property
+            %   is empty or unrecognised.
+            %
+            %   Generic across MATLAB projects: detection at runtime
+            %   is purely shape-based, no project-specific knowledge.
+            arguments
+                propName  (1,:) char
+                propType  (1,:) char = '' %#ok<INUSA>
+                fallback  (1,:) char = ''''''
+            end
+            if isempty(fallback)
+                fallback = '''''';
+            end
+            expr = sprintf( ...
+                'autotest.InputSampler.firstKeyOr(testCase.Instance.%s, %s)', ...
+                propName, fallback);
+        end
     end
 end

@@ -594,8 +594,46 @@ classdef TestWriter < handle
             if isfield(fcn, 'HelpText'), help = fcn.HelpText; end
             provider = obj.Options.FixtureProvider;
             smart = autotest.InputSampler.smartFor(inputs, argBlocks, help, provider);
+            % Phase 15 (candidate 1): live-state-aware smoke substitution.
+            % When this method's args partial-match a class container
+            % property, replace the synthetic literal with
+            % autotest.InputSampler.firstKeyOr(testCase.Instance.<prop>,
+            % <fallback>) at smoke time.  All-or-nothing safety: a missing
+            % prelude / empty container falls back to the synthetic literal.
+            for s = 1:numel(smart)
+                smart(s) = obj.applyLiveKeySubstitution(smart(s), fcn, kind);
+            end
+            % Phase 16 (candidate 1): container-typed sibling substitution.
+            % When an arg's declared/inferred type is containers.Map /
+            % dictionary / table / struct AND a public class property
+            % matches it by shape + name, replace the synthetic literal
+            % with testCase.Instance.<propName> so the smoke uses the
+            % LIVE container.  Sibling to applyLiveKeySubstitution; both
+            % may fire on the same case (different arg positions).
+            for s = 1:numel(smart)
+                smart(s) = obj.applyContainerSubstitution(smart(s), fcn, kind);
+            end
+            % Phase 16 (candidate 3): drop the stateful try/assumeFail
+            % wrap whenever every arg resolves cleanly via FixtureProvider
+            % / live-key / live-container AND the model has a state-init
+            % prelude AND the project supplies at least one primary
+            % fixture.  See `markDropStatefulWrapIfClean` for the gate.
+            for s = 1:numel(smart)
+                smart(s) = obj.markDropStatefulWrapIfClean(smart(s), fcn, kind);
+            end
             for s = 1:numel(smart)
                 buf = obj.appendCallTest(buf, fcn, smart(s), kind, false);
+            end
+            % Phase 15 (candidate 4): DOM full-fixture smoke.  Re-attempts
+            % the DOM substitution that Phase 12 reverted from smokeFor,
+            % gated on every non-DOM arg also resolving via
+            % FixtureProvider.literalForArg.  Half-fixture smokes can hang
+            % the test runner (Phase 12 lesson) so this is all-or-nothing.
+            if ~isempty(provider) && isa(provider, 'autotest.FixtureProvider')
+                domSmoke = obj.tryDomFullFixtureSmoke(fcn, provider);
+                if ~isempty(domSmoke)
+                    buf = obj.appendCallTest(buf, fcn, domSmoke, kind, false);
+                end
             end
 
             % Phase 2.3: when the FixtureProvider resolved a realistic
@@ -665,6 +703,14 @@ classdef TestWriter < handle
 
             callExpr = obj.formatCall(fcn, sample.Expr, kind);
             buf(end+1,1) = string(sprintf('        function %s(testCase)', methodName));
+            % Phase 15 (candidate 4): annotate full-fixture-DOM smokes
+            % with the resolved Args list so the post-mortem in
+            % results.xml can attribute the test back to candidate 4.
+            if isfield(sample, 'AnnotateArgs') && sample.AnnotateArgs ...
+                    && isfield(sample, 'Args') && ~isempty(sample.Args)
+                argTxt = strjoin(string(sample.Args), ', ');
+                buf(end+1,1) = string(['            % Phase 15 cand-4 Args = {' char(argTxt) '}']);
+            end
             if isEdge
                 % Edge cases may legitimately throw OR return degenerate
                 % values (NaN, Inf, []).  The contract is "doesn't crash
@@ -696,7 +742,13 @@ classdef TestWriter < handle
                 % matches the existing edge/randomized layer behaviour and
                 % preserves the "Failed = real signal" property of the
                 % per-source breakdown.
-                wrapStateful = obj.Model.IsStateful && strcmp(kind, 'method');
+                % Phase 15 (candidate 1): when live-key substitution gave
+                % us a real-state arg AND every other arg came from
+                % FixtureProvider, drop the stateful smoke wrap so a
+                % successful smoke reports as Pass (firstKeyOr already
+                % absorbs an empty-state case into the synthetic literal).
+                dropWrap = isfield(sample, 'DropStatefulWrap') && sample.DropStatefulWrap;
+                wrapStateful = obj.Model.IsStateful && strcmp(kind, 'method') && ~dropWrap;
                 % Phase 12: also wrap when the smoke uses a fixture
                 % (tempDOM, tempFileID).  Static methods that resolve
                 % DOM args via FixtureProvider may enter project-side
@@ -852,12 +904,23 @@ classdef TestWriter < handle
 
         function buf = appendDocExampleTest(~, buf, fcn, idx, exampleText)
             methodName = matlab.lang.makeValidName(sprintf('testDocExample_%s_%d', fcn.Name, idx));
-            % Examples are run via a sandbox eval, capturing expected
-            % outputs only when safe.
+            % Phase 16 (cand 5): when the extracted text contains an `=`
+            % assignment, route through runIsolatedExample so the eval
+            % runs in a clean local frame with `clearvars` first --
+            % multiple examples that share variable names don't pollute
+            % one another even when the test runner reuses workers.
+            % Plain non-assignment examples (e.g. `disp(foo())`) keep
+            % the original runExample path.
+            hasAssignment = ~isempty(strfind(exampleText, '=')) ...
+                && isempty(regexp(exampleText, '^\s*$', 'once'));
             buf(end+1,1) = string(sprintf('        function %s(testCase)', methodName));
             escaped = autotest.TestWriter.escapeString(exampleText);
             buf(end+1,1) = string(sprintf('            exampleText = sprintf(''%s'');', escaped));
-            buf(end+1,1) = "            testCase.verifyWarningFree(@() testCase.runExample(exampleText), ...";
+            if hasAssignment
+                buf(end+1,1) = "            testCase.verifyWarningFree(@() testCase.runIsolatedExample(exampleText), ...";
+            else
+                buf(end+1,1) = "            testCase.verifyWarningFree(@() testCase.runExample(exampleText), ...";
+            end
             buf(end+1,1) = "                'Example block from help text threw');";
             buf(end+1,1) = "        end";
             buf(end+1,1) = "";
@@ -1117,6 +1180,14 @@ classdef TestWriter < handle
             buf(end+1,1) = "            eval(text);";
             buf(end+1,1) = "        end";
             buf(end+1,1) = "";
+            % Phase 16 (cand 5): isolated example runner.  Each call has
+            % its own local frame; clearvars ensures no caller-leaked
+            % bindings shadow names introduced by the example body.
+            buf(end+1,1) = "        function runIsolatedExample(~, text)";
+            buf(end+1,1) = "            clearvars('-except', 'text');";
+            buf(end+1,1) = "            eval(text);";
+            buf(end+1,1) = "        end";
+            buf(end+1,1) = "";
             % Phase 3 (Option 2): file-dialog stub helpers, inlined so
             % generated tXxx.m files stay self-contained (no runtime
             % dependency on the +autotest package).
@@ -1304,6 +1375,446 @@ classdef TestWriter < handle
             else
                 expr = char(strjoin(parts, ', '));
             end
+        end
+
+        function smartCase = applyLiveKeySubstitution(obj, smartCase, fcn, kind)
+            %APPLYLIVEKEYSUBSTITUTION  Live-state arg substitution (Phase 15 cand-1, Phase 16 cand-2).
+            %
+            %   Walk SMARTCASE.Args; for each position whose arg name
+            %   key-shaped (ends in name/id/key) AND partial-matches a
+            %   class container property, replace the synthetic literal
+            %   with autotest.InputSampler.firstKeyOr(...) so the smoke
+            %   uses a real key when the prelude has populated state.
+            %
+            %   Phase 16 (candidate 2): value-shaped args.  When the arg
+            %   has NO name/id/key suffix (so the key path doesn't fire)
+            %   AND its declared type is table / struct / cell AND a
+            %   public class property of that same value type matches
+            %   by name, emit autotest.InputSampler.firstValueOr(...)
+            %   to draw a sample VALUE from the populated container.
+            %
+            %   Sets DropStatefulWrap = true when any substitution
+            %   happened so the caller drops Phase 11's try/assumeFail.
+            %   Generic across MATLAB projects: pure name-similarity.
+            if ~strcmp(kind, 'method'), return; end
+            if ~isa(obj.Model, 'autotest.SourceModel'), return; end
+            if ~strcmp(obj.Model.Kind, 'classdef'), return; end
+            if isempty(obj.Model.Properties), return; end
+            inputs = fcn.Inputs;
+            if isempty(inputs), return; end
+            if ~isfield(smartCase, 'Args') || isempty(smartCase.Args), return; end
+            args = smartCase.Args;
+            if numel(args) ~= numel(inputs)
+                % Variadic / mismatched -- give up cleanly.
+                return;
+            end
+            argBlocks = {};
+            if isfield(fcn, 'ArgumentBlocks')
+                argBlocks = fcn.ArgumentBlocks;
+            end
+            typed = autotest.InputSampler.typesFromArguments(inputs, argBlocks);
+            didSubstitute = false;
+            for k = 1:numel(inputs)
+                argName = inputs{k};
+                if strcmp(argName, 'varargin'), break; end
+                % --- Key path (Phase 15 cand-1) ---
+                [propName, propType] = obj.matchArgToProperty( ...
+                    argName, obj.Model.Properties);
+                if ~isempty(propName)
+                    fallback = char(args{k});
+                    liveExpr = autotest.StateInitializer.liveKeyExpr( ...
+                        propName, propType, fallback);
+                    args{k} = liveExpr;
+                    didSubstitute = true;
+                    continue;
+                end
+                % --- Value path (Phase 16 cand-2) ---
+                argType = '';
+                if k <= numel(typed) && isfield(typed{k}, 'Type')
+                    argType = lower(strtrim(char(typed{k}.Type)));
+                end
+                [vPropName, vPropType] = obj.matchArgToValueProperty( ...
+                    argName, argType, obj.Model.Properties);
+                if isempty(vPropName), continue; end
+                fallback = char(args{k});
+                liveExpr = autotest.StateInitializer.liveValueExpr( ...
+                    vPropName, vPropType, fallback);
+                args{k} = liveExpr;
+                didSubstitute = true;
+            end
+            if didSubstitute
+                smartCase.Args = args;
+                smartCase.Expr = autotest.InputSampler.argsToCallStr(args);
+                smartCase.DropStatefulWrap = true;
+            end
+        end
+
+        function [propName, propType] = matchArgToProperty(~, argName, props)
+            %MATCHARGTOPROPERTY  Partial-match arg to container property.
+            %
+            %   Phase 15 (candidate 1) helper.  Returns the class
+            %   property name + type that best matches a key-shaped
+            %   arg, or '' if no candidate property exists.
+            %
+            %   Match rules (case-insensitive):
+            %     1. ARG must end in name / id / key (otherwise the
+            %        arg is a value not a key -- do not substitute).
+            %     2. Strip that suffix to get BASE.
+            %     3. Find a public property whose lowercased name
+            %        starts with BASE and ends in a container suffix
+            %        (s / map / cache / list / set / dict / tables).
+            %        A direct equality match (lprop == base) also
+            %        counts.
+            propName = '';
+            propType = '';
+            if isempty(argName) || isempty(props), return; end
+            larg = lower(strtrim(char(argName)));
+            if isempty(larg), return; end
+            keySuffixes = {'name', 'id', 'key'};
+            base = '';
+            for s = 1:numel(keySuffixes)
+                suf = keySuffixes{s};
+                if endsWith(larg, suf) && length(larg) > length(suf)
+                    base = larg(1:end-length(suf));
+                    break;
+                end
+            end
+            if isempty(base), return; end
+            containerSuffixes = {'map', 'cache', 'list', 'set', 'dict', 'tables', 's'};
+            for i = 1:numel(props)
+                p = props(i);
+                if ~isfield(p, 'Name') || isempty(p.Name), continue; end
+                if isfield(p, 'Access') ...
+                        && ~isempty(p.Access) ...
+                        && ~strcmpi(p.Access, 'public')
+                    % Private/protected properties are still
+                    % accessible from inside the test class via
+                    % testCase.Instance, but skip them anyway --
+                    % the autogen prefers public-only state.
+                    continue;
+                end
+                lprop = lower(p.Name);
+                if ~startsWith(lprop, base), continue; end
+                if strcmp(lprop, base)
+                    propName = p.Name;
+                    if isfield(p, 'Type'), propType = char(p.Type); end
+                    return;
+                end
+                for k = 1:numel(containerSuffixes)
+                    csuf = containerSuffixes{k};
+                    if endsWith(lprop, csuf)
+                        propName = p.Name;
+                        if isfield(p, 'Type'), propType = char(p.Type); end
+                        return;
+                    end
+                end
+            end
+        end
+
+        function smartCase = applyContainerSubstitution(obj, smartCase, fcn, kind)
+            %APPLYCONTAINERSUBSTITUTION  Container-typed arg substitution (Phase 16 cand-1).
+            %
+            %   Walk SMARTCASE.Args; for each position whose declared/
+            %   inferred type matches a class container property's type
+            %   (containers.Map / dictionary / table / struct) AND whose
+            %   name matches the property name (case-insensitive,
+            %   plural-aware), replace the synthetic literal with the
+            %   live property accessor testCase.Instance.<propName>.
+            %   Sets DropStatefulWrap = true when any substitution
+            %   happened.  Generic across MATLAB projects: pure shape +
+            %   name similarity, no project-specific knowledge.
+            %
+            %   Sibling to applyLiveKeySubstitution; both may run on
+            %   the same case for different arg positions.  Short-
+            %   circuits to the synthetic-literal fallback the moment
+            %   a candidate property is wrong-shape; never emits a
+            %   half-resolved arg list.
+            if ~strcmp(kind, 'method'), return; end
+            if ~isa(obj.Model, 'autotest.SourceModel'), return; end
+            if ~strcmp(obj.Model.Kind, 'classdef'), return; end
+            if isempty(obj.Model.Properties), return; end
+            inputs = fcn.Inputs;
+            if isempty(inputs), return; end
+            if ~isfield(smartCase, 'Args') || isempty(smartCase.Args), return; end
+            args = smartCase.Args;
+            if numel(args) ~= numel(inputs)
+                return;
+            end
+            argBlocks = {};
+            if isfield(fcn, 'ArgumentBlocks')
+                argBlocks = fcn.ArgumentBlocks;
+            end
+            typed = autotest.InputSampler.typesFromArguments(inputs, argBlocks);
+            didSubstitute = false;
+            for k = 1:numel(inputs)
+                argName = inputs{k};
+                if strcmp(argName, 'varargin'), break; end
+                argType = '';
+                if k <= numel(typed) && isfield(typed{k}, 'Type')
+                    argType = lower(strtrim(char(typed{k}.Type)));
+                end
+                propName = obj.matchArgToContainerProperty( ...
+                    argName, argType, obj.Model.Properties);
+                if isempty(propName), continue; end
+                propType = '';
+                for p = 1:numel(obj.Model.Properties)
+                    if strcmp(obj.Model.Properties(p).Name, propName)
+                        if isfield(obj.Model.Properties(p), 'Type')
+                            propType = char(obj.Model.Properties(p).Type);
+                        end
+                        break;
+                    end
+                end
+                args{k} = autotest.StateInitializer.liveContainerExpr( ...
+                    propName, propType);
+                didSubstitute = true;
+            end
+            if didSubstitute
+                smartCase.Args = args;
+                smartCase.Expr = autotest.InputSampler.argsToCallStr(args);
+                smartCase.DropStatefulWrap = true;
+            end
+        end
+
+        function propName = matchArgToContainerProperty(~, argName, argType, props)
+            %MATCHARGTOCONTAINERPROPERTY  Phase 16 cand-1 helper.
+            %
+            %   Returns the matching property name when:
+            %     1. The arg's declared/inferred type is one of the
+            %        recognised container types (containers.Map /
+            %        dictionary / table / struct), OR the arg has no
+            %        declared type but the NAME suggests a container
+            %        (suffix s/map/set/dict/cache).
+            %     2. There exists a public class property whose declared
+            %        type also matches one of those container types AND
+            %        whose name matches the arg name (case-insensitive,
+            %        plural-aware: arg `tables` <-> prop `Tables`,
+            %        arg `sheetMap` <-> prop `SheetMap`,
+            %        arg `tableMetadata` <-> prop `TableMetadata`).
+            %   Returns '' otherwise.
+            propName = '';
+            if isempty(argName) || isempty(props), return; end
+            larg = lower(strtrim(char(argName)));
+            if isempty(larg), return; end
+            % Skip key-shaped args -- those are handled by the key path
+            % (applyLiveKeySubstitution + matchArgToProperty).
+            keySuffixes = {'name', 'id', 'key'};
+            for s = 1:numel(keySuffixes)
+                if endsWith(larg, keySuffixes{s}) ...
+                        && length(larg) > length(keySuffixes{s})
+                    return;
+                end
+            end
+            containerTypes = {'containers.map', 'dictionary', 'table', 'struct'};
+            argTypeMatches = ~isempty(argType) ...
+                && any(strcmp(argType, containerTypes));
+            % Name-shape fallback: container-suffixed names without
+            % a declared type still qualify.
+            nameSuffixes = {'map', 'set', 'dict', 'cache'};
+            nameLooksContainer = false;
+            for s = 1:numel(nameSuffixes)
+                if endsWith(larg, nameSuffixes{s}) ...
+                        && length(larg) > length(nameSuffixes{s})
+                    nameLooksContainer = true; break;
+                end
+            end
+            if ~nameLooksContainer && length(larg) >= 2 ...
+                    && larg(end) == 's' && larg(end-1) ~= 's'
+                nameLooksContainer = true;
+            end
+            if ~argTypeMatches && ~nameLooksContainer, return; end
+            for i = 1:numel(props)
+                p = props(i);
+                if ~isfield(p, 'Name') || isempty(p.Name), continue; end
+                if isfield(p, 'Access') && ~isempty(p.Access) ...
+                        && ~strcmpi(p.Access, 'public')
+                    continue;
+                end
+                ptype = '';
+                if isfield(p, 'Type'), ptype = lower(strtrim(char(p.Type))); end
+                ptype = regexprep(ptype, '\([^)]*\)', '');
+                ptype = regexprep(ptype, '\{[^}]*\}', '');
+                ptype = strtrim(ptype);
+                ptokens = strsplit(ptype);
+                pbase = '';
+                if ~isempty(ptokens), pbase = ptokens{1}; end
+                if ~any(strcmp(pbase, containerTypes)), continue; end
+                lprop = lower(p.Name);
+                % Direct equality.
+                if strcmp(lprop, larg)
+                    propName = p.Name; return;
+                end
+                % Plural / singular.
+                if strcmp([larg 's'], lprop) || strcmp(larg, [lprop 's'])
+                    propName = p.Name; return;
+                end
+                % Composite name: arg `sheetMap` matches prop `SheetMap`
+                % (handled by direct equality once lowercased; both are
+                % already lowered).  But arg `metadata` matches prop
+                % `TableMetadata` only if larg is a SUFFIX of lprop.
+                if endsWith(lprop, larg) && length(lprop) > length(larg)
+                    propName = p.Name; return;
+                end
+                if endsWith(larg, lprop) && length(larg) > length(lprop)
+                    propName = p.Name; return;
+                end
+            end
+        end
+
+        function [propName, propType] = matchArgToValueProperty(~, argName, argType, props)
+            %MATCHARGTOVALUEPROPERTY  Phase 16 cand-2 helper.
+            %
+            %   Returns the matching property name + type when:
+            %     1. The arg's declared type is `table` / `struct` / `cell`.
+            %     2. There exists a public class property of `table` /
+            %        `struct` / `cell` / `containers.Map` / `dictionary`
+            %        type whose name matches the arg name (case-
+            %        insensitive, plural-aware).
+            %   Used to draw a sample VALUE from a sibling container at
+            %   smoke time (firstValueOr).  Returns '' / '' when no
+            %   match.  Generic across MATLAB projects.
+            propName = '';
+            propType = '';
+            if isempty(argName) || isempty(props), return; end
+            larg = lower(strtrim(char(argName)));
+            if isempty(larg), return; end
+            valueArgTypes = {'table', 'struct', 'cell'};
+            if isempty(argType) || ~any(strcmp(argType, valueArgTypes))
+                return;
+            end
+            % Skip key-shaped args.
+            keySuffixes = {'name', 'id', 'key'};
+            for s = 1:numel(keySuffixes)
+                if endsWith(larg, keySuffixes{s}) ...
+                        && length(larg) > length(keySuffixes{s})
+                    return;
+                end
+            end
+            valueContainerTypes = {'table', 'struct', 'cell', ...
+                                   'containers.map', 'dictionary'};
+            for i = 1:numel(props)
+                p = props(i);
+                if ~isfield(p, 'Name') || isempty(p.Name), continue; end
+                if isfield(p, 'Access') && ~isempty(p.Access) ...
+                        && ~strcmpi(p.Access, 'public')
+                    continue;
+                end
+                ptype = '';
+                if isfield(p, 'Type'), ptype = lower(strtrim(char(p.Type))); end
+                ptype = regexprep(ptype, '\([^)]*\)', '');
+                ptype = regexprep(ptype, '\{[^}]*\}', '');
+                ptype = strtrim(ptype);
+                ptokens = strsplit(ptype);
+                pbase = '';
+                if ~isempty(ptokens), pbase = ptokens{1}; end
+                if ~any(strcmp(pbase, valueContainerTypes)), continue; end
+                lprop = lower(p.Name);
+                if strcmp(lprop, larg) ...
+                        || strcmp([larg 's'], lprop) ...
+                        || strcmp(larg, [lprop 's']) ...
+                        || (endsWith(lprop, larg) && length(lprop) > length(larg)) ...
+                        || (endsWith(larg, lprop) && length(larg) > length(lprop))
+                    propName = p.Name;
+                    propType = char(p.Type);
+                    return;
+                end
+            end
+        end
+
+        function smartCase = markDropStatefulWrapIfClean(obj, smartCase, fcn, kind) %#ok<INUSD>
+            %MARKDROPSTATEFULWRAPIFCLEAN  Phase 16 cand-3 wrap-drop gate.
+            %
+            %   Sets smartCase.DropStatefulWrap = true when:
+            %     (a) every smartCase arg resolved cleanly (smartFor's
+            %         all-or-nothing resolution; reaching this method
+            %         means provider.literalForArg returned non-empty
+            %         for every input -- no fallback to scalarFor),
+            %     (b) the model has at least one state-init candidate
+            %         detected by StateInitializer.candidateMethodCalls,
+            %     (c) the FixtureProvider has at least one primary
+            %         fixture (PrimaryExcel / PrimaryImage /
+            %         PrimaryKeepList).
+            %   When any condition fails the case is returned unchanged.
+            %   Generic across MATLAB projects.
+            if ~strcmp(kind, 'method'), return; end
+            if ~obj.Model.IsStateful, return; end
+            if isfield(smartCase, 'DropStatefulWrap') && smartCase.DropStatefulWrap
+                return;
+            end
+            provider = [];
+            if ~isempty(obj.Options) && isprop(obj.Options, 'FixtureProvider')
+                provider = obj.Options.FixtureProvider;
+            end
+            if isempty(provider) ...
+                    || ~isa(provider, 'autotest.FixtureProvider')
+                return;
+            end
+            initCalls = autotest.StateInitializer.candidateMethodCalls( ...
+                obj.Model, provider);
+            if isempty(initCalls), return; end
+            if ~obj.fixtureProviderHasPrimary(provider), return; end
+            smartCase.DropStatefulWrap = true;
+        end
+
+        function tf = fixtureProviderHasPrimary(~, provider)
+            tf = ~isempty(provider.PrimaryExcel) ...
+                || ~isempty(provider.PrimaryImage) ...
+                || ~isempty(provider.PrimaryKeepList);
+        end
+
+        function smokeCase = tryDomFullFixtureSmoke(~, fcn, provider)
+            %TRYDOMFULLFIXTURESMOKE  Build a DOM full-fixture smoke (cand 4).
+            %
+            %   Returns a smoke case (struct with Label/Expr/Kind/Args/
+            %   AnnotateArgs) when:
+            %     1. At least one arg is DOM-typed/named.
+            %     2. Every NON-DOM arg resolves to a non-empty literal
+            %        via FixtureProvider.literalForArg.
+            %   Otherwise returns [].  Half-fixture smokes (any non-DOM
+            %   arg falling through to InputSampler.scalarFor) are
+            %   dropped: Phase 12 documented those as hang-prone.
+            smokeCase = [];
+            inputs = fcn.Inputs;
+            if isempty(inputs), return; end
+            argBlocks = {};
+            if isfield(fcn, 'ArgumentBlocks')
+                argBlocks = fcn.ArgumentBlocks;
+            end
+            helpText = '';
+            if isfield(fcn, 'HelpText'), helpText = fcn.HelpText; end
+            typed = autotest.InputSampler.typesFromArguments(inputs, argBlocks);
+            args = cell(1, numel(inputs));
+            hasDOM = false;
+            for k = 1:numel(inputs)
+                argName = inputs{k};
+                if strcmp(argName, 'varargin')
+                    args = args(1:k-1);
+                    break;
+                end
+                isDom = autotest.InputSampler.isDOMName(argName) ...
+                    || autotest.InputSampler.isDOMType(typed{k});
+                if isDom
+                    args{k} = autotest.InputSampler.domExpr();
+                    hasDOM = true;
+                    continue;
+                end
+                lit = '';
+                try
+                    lit = provider.literalForArg(argName, typed{k}, helpText);
+                catch
+                    return;
+                end
+                if isempty(lit)
+                    % Half-fixture not allowed -- abort the smoke.
+                    return;
+                end
+                args{k} = lit;
+            end
+            if ~hasDOM, return; end
+            smokeCase = autotest.InputSampler.makeCase('domFullFixture', ...
+                autotest.InputSampler.argsToCallStr(args), 'smoke');
+            smokeCase.Args = args;
+            smokeCase.AnnotateArgs = true;
         end
     end
 

@@ -111,6 +111,84 @@ classdef FixtureProvider < handle
                 end
             end
 
+            % --- Phase 16 (candidate 4): mustBeMember validator pull --------
+            % When the `arguments` block declares
+            %     argName ... {mustBeMember(argName, ["a","b","c"])}
+            % InputSampler.typesFromArguments captures the allowed list as
+            % argInfo.MustBeMember.  Use the FIRST allowed value as the
+            % literal so the smoke is guaranteed to satisfy validation
+            % (no synthesis, no risk of an "expected member" failure on
+            % the first call into the project).  Generic across MATLAB
+            % projects.  Inserted AFTER the typed table/cell branch and
+            % BEFORE the Phase 15 cand-5 data/value/payload branch so
+            % an `arguments` row that has BOTH an explicit type AND
+            % mustBeMember validators picks the validator-driven value.
+            if isfield(argInfo, 'MustBeMember') && ~isempty(argInfo.MustBeMember)
+                first = argInfo.MustBeMember{1};
+                if ischar(first) || isstring(first)
+                    s = char(first);
+                    % Pick the literal flavour by declared type:
+                    % string -> "..."  (double-quoted)
+                    % otherwise (char / unspecified) -> '...'
+                    if strcmp(ltype, 'string')
+                        expr = ['"' strrep(s, '"', '""') '"'];
+                    else
+                        expr = ['''' strrep(s, '''', '''''') ''''];
+                    end
+                    return;
+                elseif isnumeric(first) && isscalar(first) && isfinite(first)
+                    if floor(first) == first && abs(first) < 1e12
+                        expr = sprintf('%d', first);
+                    else
+                        expr = sprintf('%g', first);
+                    end
+                    return;
+                end
+            end
+
+            % --- Phase 15 (candidate 5): typed `data`/`value`/`payload` -----
+            % When an `arguments` block declares one of these names with an
+            % explicit type AND a recognised SizeHint, return a type+shape-
+            % appropriate fixture.  Gated on argInfo.IsExplicit so the
+            % heuristic is dormant when no `arguments` block is present
+            % (a `data` arg with no declared type is too ambiguous; the
+            % existing default-fallthrough is correct).  Generic across
+            % MATLAB projects.
+            if isfield(argInfo, 'IsExplicit') && argInfo.IsExplicit ...
+                    && (strcmp(lname, 'data') || strcmp(lname, 'value') ...
+                        || strcmp(lname, 'payload'))
+                sh = '';
+                if isfield(argInfo, 'SizeHint'), sh = argInfo.SizeHint; end
+                switch ltype
+                    case 'string'
+                        expr = '"abc"';
+                        return;
+                    case 'char'
+                        expr = '''abc''';
+                        return;
+                    case {'double', 'single', 'numeric'}
+                        switch sh
+                            case 'scalar', expr = '1';
+                            case 'vector', expr = '[1 2 3]';
+                            case 'matrix', expr = 'magic(3)';
+                            otherwise,     expr = '1';
+                        end
+                        return;
+                    case 'logical'
+                        expr = 'true';
+                        return;
+                    case 'table'
+                        expr = 'table([1;2;3], ["a";"b";"c"], ''VariableNames'', {''N'', ''S''})';
+                        return;
+                    case 'cell'
+                        expr = '{1, ''a''; 2, ''b''}';
+                        return;
+                    case 'struct'
+                        expr = 'struct(''value'', 1)';
+                        return;
+                end
+            end
+
             % --- Stringy name-only heuristics (message/text/title/...) ----
             % Phase 13: extend the exact-name list with common composite
             % suffixes (titleText, headerText, subtitle) so callers like
