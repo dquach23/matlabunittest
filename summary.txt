@@ -1,0 +1,44 @@
+autotest run summary
+====================
+Timestamp:        20260511-091140
+Project folder:   C:\Users\1549399246E\MATLAB\Projects\redactiontool
+Output root:      C:\Users\1549399246E\MATLAB\Projects\redactiontool\_autotest
+
+Sources scanned:  18
+  generated:      18
+  failed:         0
+
+Generated tests:  884
+  passed:         847
+  failed:         11
+  incomplete:     37
+
+User stub tests:  118 (all Incomplete by design --
+                  fill in user_tests/u<Name>.m to enable)
+
+Total tests:      1002
+  passed:         847
+  failed:         11
+  incomplete:     155
+Duration:         119.02 s
+
+Per-source breakdown
+--------------------
+  [gen] RedactionToolGUI.mlapp  (passed 38/38, failed 0)
+  [gen] runTestsCI.m  (passed 1/2, failed 1)
+  [gen] Classes\CellRefUtils.m  (passed 66/66, failed 0)
+  [gen] Classes\CellRefUtilsTest.m  (passed 3/3, failed 0)
+  [gen] Classes\ConsoleLogger.m  (passed 39/39, failed 0)
+  [gen] Classes\ConsoleLoggerTest.m  (passed 3/3, failed 0)
+  [gen] Classes\ExcelProcessor.m  (passed 181/207, failed 9)
+  [gen] Classes\ExcelProcessorTest.m  (passed 3/3, failed 0)
+  [gen] Classes\ExcelRemover.m  (passed 204/206, failed 0)
+  [gen] Classes\ExcelRemoverTest.m  (passed 3/3, failed 0)
+  [gen] Classes\ExcelXmlCleaner.m  (passed 110/116, failed 1)
+  [gen] Classes\ExcelXmlCleanerTest.m  (passed 3/3, failed 0)
+  [gen] Classes\ReportWriter.m  (passed 57/57, failed 0)
+  [gen] Classes\ReportWriterTest.m  (passed 3/3, failed 0)
+  [gen] Classes\TableMetadata.m  (passed 66/68, failed 0)
+  [gen] Classes\TableMetadataTest.m  (passed 3/3, failed 0)
+  [gen] Classes\TextRedactor.m  (passed 61/61, failed 0)
+  [gen] Classes\TextRedactorTest.m  (passed 3/3, failed 0)
