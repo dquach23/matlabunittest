@@ -27,6 +27,10 @@ function info = generateSystemTestReport(folder, varargin)
 %       'OutputDir'               [<FOLDER>/_autotest/reports]
 %       'OutputBaseName'          [<basename of FOLDER>]
 %       'PdfBackend'              ['auto' | 'rptgen' | 'libreoffice' | 'none']
+%       'Classification'          ['UNCLASSIFIED']  -- v1.4: CAPCO banner
+%                                 level.  One of {UNCLASSIFIED, CONFIDENTIAL,
+%                                 SECRET, TOP SECRET, FOUO}; unrecognised
+%                                 values fall through to a charcoal banner.
 %
 %   Returns:
 %       INFO  struct with fields {DocxPath, PdfPath, BackendLogPath,
@@ -56,6 +60,7 @@ function info = generateSystemTestReport(folder, varargin)
     p.addParameter('OutputDir', '', @(x) ischar(x) || isstring(x));
     p.addParameter('OutputBaseName', '', @(x) ischar(x) || isstring(x));
     p.addParameter('PdfBackend', 'auto', @(x) ischar(x) || isstring(x));
+    p.addParameter('Classification', 'UNCLASSIFIED', @(x) ischar(x) || isstring(x));
     p.parse(varargin{:});
 
     opts = struct();

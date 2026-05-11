@@ -197,17 +197,11 @@ function info = runWorkflow(folder, varargin)
         'LogFile',       logFile, ...
         'GenerationErrors', {cellstr(genErrors)});
 
-    % ── Render polished reports (HTML + Markdown + best-effort PDF) ──────
-    % These supplement (not replace) the existing summary.txt /
-    % results.xml / results.tap so CI consumers and humans both have a
-    % usable view.
-    try
-        autotest.ReportRenderer.renderAll(info);
-        fprintf('Wrote report.html, report.md, report.pdf in %s\n', reportsDir);
-    catch ME
-        warning('autotest:ReportRenderer', ...
-            'Polished report rendering failed: %s', ME.message);
-    end
+    % v1.4: legacy autotest.ReportRenderer (HTML + Markdown + best-effort
+    % PDF) was retired.  The native system-test-report generator below
+    % (autotest.generateSystemTestReport, opted in via 'GenerateReport')
+    % supersedes it -- single .docx deliverable + audit sidecar + every
+    % chart and table the legacy report carried plus the v1.4 polish.
 
     % ── Phase 15: native MATLAB system-test-report generator ─────────────
     % When 'GenerateReport' is true, build a full Word-format system test

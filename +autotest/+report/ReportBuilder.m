@@ -58,7 +58,7 @@ classdef ReportBuilder
                 case 'rptgen'
                     backend = autotest.report.backends.RptgenBackend(docxPath);
                 case 'ooxml'
-                    backend = autotest.report.backends.OoxmlBackend(docxPath);
+                    backend = autotest.report.backends.OoxmlBackend(docxPath, opts.Classification);
                 otherwise
                     error('autotest:report:Backend', 'No backend selected.');
             end
@@ -83,8 +83,10 @@ classdef ReportBuilder
                 'Audit',         audit);
 
             % Emit the cover page, TOC, body, appendices.
+            % v1.4: cover() consolidated into SectionBuilder so the
+            % former +autotest/+report/CoverPage.m can be retired.
             ctxOpts = autotest.report.ReportBuilder.coverFields(opts, data);
-            autotest.report.CoverPage.emit(backend, ctxOpts);
+            autotest.report.SectionBuilder.cover(backend, ctxOpts);
             backend.addTOC('Table of Contents');
             autotest.report.SectionBuilder.emit(backend, ctx);
             backend.close();
@@ -387,7 +389,8 @@ classdef ReportBuilder
                 'TestCycle',       ts, ...
                 'DistReason',      opts.DistributionReason, ...
                 'DistDate',        opts.DistributionDate, ...
-                'DistController',  opts.DistributionController);
+                'DistController',  opts.DistributionController, ...
+                'Classification',  opts.Classification);
         end
 
         function pdfPath = tryRenderPdf(backend, docxPath, pdfPath, mode, detector)
@@ -518,6 +521,11 @@ classdef ReportBuilder
             end
             if ~isfield(opts, 'PdfBackend') || isempty(opts.PdfBackend)
                 opts.PdfBackend = 'auto';
+            end
+            % v1.4: CAPCO classification banner.  Defaults to UNCLASSIFIED
+            % so existing callers see the green banner without any change.
+            if ~isfield(opts, 'Classification') || isempty(opts.Classification)
+                opts.Classification = 'UNCLASSIFIED';
             end
         end
 

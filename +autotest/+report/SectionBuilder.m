@@ -17,6 +17,57 @@ classdef SectionBuilder
     %   ooxml).
 
     methods (Static)
+        function cover(backend, opts)
+            %COVER  v1.4 -- consolidated cover-page emitter (was CoverPage.m).
+            %
+            %   OPTS fields:
+            %       DisplayName, DocVersion, ProjectOwner, DocDateIssued,
+            %       TestCycle, DistReason, DistDate, DistController,
+            %       Classification.
+            %
+            %   Visual delta vs the v1.3 CoverPage.emit:
+            %     - Title is now Style.TitleFontSize (48pt) and bold.
+            %     - Subtitle is Style.SubtitleFontSize (18pt) italic.
+            %     - A 1pt accent-coloured rule sits between the metadata
+            %       table and the Distribution Statement D box.
+            %     - Classification line is added to the metadata table so
+            %       the level appears on the cover even if a reader skims
+            %       past the banner.
+            arguments
+                backend
+                opts struct
+            end
+            distHeader = 'DISTRIBUTION STATEMENT D';
+            distBody = sprintf( ...
+                ['Distribution authorized to the Department of Defense and ' ...
+                 'U.S. DoD contractors only; %s; %s.  Other requests for this ' ...
+                 'document shall be referred to %s.'], ...
+                opts.DistReason, opts.DistDate, opts.DistController);
+            classification = autotest.report.SectionBuilder.optOrDefault( ...
+                opts, 'Classification', 'UNCLASSIFIED');
+            metadata = { ...
+                'Test Cycle',        opts.TestCycle; ...
+                'Date Issued',       opts.DocDateIssued; ...
+                'Prepared For',      opts.ProjectOwner; ...
+                'Prepared By',       'matlabunittest QA / autotest agent'; ...
+                'Document Version',  opts.DocVersion; ...
+                'Classification',    upper(strtrim(classification))};
+            fields = struct( ...
+                'Title',    opts.DisplayName, ...
+                'Subtitle', 'System Test Report', ...
+                'Metadata', {metadata}, ...
+                'AccentRule', true);
+            backend.addCoverPage(fields, distHeader, distBody);
+        end
+
+        function v = optOrDefault(opts, name, default)
+            if isstruct(opts) && isfield(opts, name) && ~isempty(opts.(name))
+                v = char(opts.(name));
+            else
+                v = default;
+            end
+        end
+
         function emit(backend, ctx)
             autotest.report.SectionBuilder.executiveSummary(backend, ctx);
             autotest.report.SectionBuilder.systemUnderTest(backend, ctx);
@@ -212,6 +263,21 @@ classdef SectionBuilder
                 'Wall-clock duration',          sprintf('%.2f s', s.DurationS), '0 s (not auto-run)', sprintf('%.2f s', s.DurationS) };
             backend.addTable({'Metric', 'Generated', 'User-stub', 'Total'}, ...
                 rows, [3500, 2000, 1900, 1960]);
+            % v1.4 (B.1): pie chart of pass / fail / incomplete.  Rendered
+            % to a tempfile via figure -> pie -> print('-dpng','-r150')
+            % and embedded inline.  Colours follow the locked palette:
+            % muted gold for passed, deep red for failed, slate for
+            % incomplete.  Best-effort -- any failure here just skips
+            % the chart and continues with the existing tabular data.
+            try
+                pngPie = autotest.report.SectionBuilder.renderPieChart( ...
+                    s.GenPassed, s.GenFailed, s.GenIncomplete);
+                if ~isempty(pngPie)
+                    backend.addImage(pngPie, 5400, 4500); % ~3.75" x 3.13"
+                end
+            catch ME
+                warning('autotest:report:pie', 'Pie chart skipped: %s', ME.message);
+            end
             backend.addHeading(2, '4.2 Per-Source Breakdown');
             backend.addParagraph( ...
                 ['The pass-rate per source file is shown below.  Failures remain ' ...
@@ -244,6 +310,20 @@ classdef SectionBuilder
                  'the test outcomes against that source and highlighting any ' ...
                  'defect IDs that originated in it.  Defect IDs cross-reference ' ...
                  'Section 6 (Defect Register).']);
+            % v1.4 (B.2): horizontal bar chart of pass rate per source
+            % file.  Reuses the OoxmlBackend image-embed path added in
+            % B.1; rendered at 150 DPI and embedded inline above the
+            % per-source narrative.  Best-effort.
+            try
+                pngBar = autotest.report.SectionBuilder.renderBarChart(d.PerSource);
+                if ~isempty(pngBar)
+                    n = numel(d.PerSource);
+                    heightDxa = max(2400, 480 * n + 960);
+                    backend.addImage(pngBar, 8400, heightDxa);
+                end
+            catch ME
+                warning('autotest:report:bar', 'Bar chart skipped: %s', ME.message);
+            end
             for i = 1:numel(d.PerSource)
                 p = d.PerSource(i);
                 backend.addHeading(2, sprintf('5.%d  %s', i, p.File));
@@ -494,7 +574,16 @@ classdef SectionBuilder
                     msg = samples(s).Message;
                     if isempty(msg), msg = '(no diagnostic captured)'; end
                     if length(msg) > 1500, msg = [msg(1:1500) ' ...']; end
-                    backend.addParagraph(msg);
+                    % v1.4 (B.4): render diagnostics in monospace +
+                    % light-grey fill so they read like real code,
+                    % not like memo prose.  Falls back to plain
+                    % paragraph if the backend predates addCodeBlock
+                    % (rptgen tier).
+                    if ismethod(backend, 'addCodeBlock')
+                        backend.addCodeBlock(msg);
+                    else
+                        backend.addParagraph(msg);
+                    end
                 end
             end
         end
@@ -857,6 +946,108 @@ classdef SectionBuilder
                 rows{row,2} = terms{i+1};
             end
             backend.addTable({'Term','Definition'}, rows, [2400, 6960]);
+        end
+
+        % ====================================================== v1.4 chart helpers
+
+        function pngPath = renderPieChart(passed, failed, incomplete)
+            %RENDERPIECHART  v1.4 (B.1) -- pass/fail/incomplete pie.
+            %   Returns the absolute path to a freshly-written tempfile
+            %   PNG (rendered at 150 DPI), or '' on failure.  Colours
+            %   follow the locked palette: muted gold for passed,
+            %   deep red for failed, slate for incomplete.
+            pngPath = '';
+            try
+                vals = double([passed, failed, incomplete]);
+                names = {'Passed','Failed','Incomplete'};
+                % CAPCO/v1.4 palette (RGB on 0-1).
+                colours = [ ...
+                    0.706 0.325 0.035; ...   % muted gold #B45309
+                    0.600 0.106 0.106; ...   % deep red   #991B1B
+                    0.294 0.333 0.388 ];     % slate      #4B5563
+                fig = figure('Visible','off','Color','w', ...
+                    'Position',[0 0 700 560], 'PaperPositionMode','auto');
+                cleanup = onCleanup(@() close(fig)); %#ok<NASGU>
+                ax = axes(fig); %#ok<LAXES>
+                if all(vals == 0)
+                    h = pie(ax, 1, {'(no tests)'});
+                    if numel(h) >= 1 && isgraphics(h(1), 'patch')
+                        h(1).FaceColor = colours(3,:);
+                    end
+                else
+                    nz = vals > 0;
+                    labels = cell(1, sum(nz));
+                    nzIdx = find(nz);
+                    for k = 1:numel(nzIdx)
+                        ix = nzIdx(k);
+                        labels{k} = sprintf('%s (%d)', names{ix}, vals(ix));
+                    end
+                    h = pie(ax, vals(nz), labels);
+                    % Patch handles are at odd indices (1,3,5,...).
+                    nzColours = colours(nz, :);
+                    pIdx = 1;
+                    for k = 1:numel(h)
+                        if isgraphics(h(k), 'patch') && pIdx <= size(nzColours,1)
+                            h(k).FaceColor = nzColours(pIdx, :);
+                            h(k).EdgeColor = 'w';
+                            h(k).LineWidth = 1.5;
+                            pIdx = pIdx + 1;
+                        end
+                    end
+                end
+                title(ax, 'Test Results Breakdown', ...
+                    'Color', [0.122 0.161 0.216], 'FontSize', 14, 'FontWeight','bold');
+                pngPath = [tempname() '.png'];
+                print(fig, pngPath, '-dpng', '-r150');
+            catch ME
+                warning('autotest:report:pieRender', ...
+                    'renderPieChart failed: %s', ME.message);
+                pngPath = '';
+            end
+        end
+
+        function pngPath = renderBarChart(perSource)
+            %RENDERBARCHART  v1.4 (B.2) -- pass-rate per source bar chart.
+            %   Renders a horizontal bar chart with one bar per source,
+            %   each bar coloured muted gold accent.  Returns the
+            %   tempfile PNG path or '' on failure.
+            pngPath = '';
+            try
+                if isempty(perSource), return; end
+                n = numel(perSource);
+                rates = zeros(1, n);
+                labels = cell(1, n);
+                for i = 1:n
+                    p = perSource(i);
+                    labels{i} = char(p.File);
+                    if p.Total > 0
+                        rates(i) = 100 * p.Passed / p.Total;
+                    end
+                end
+                % Figure height scales with number of sources so labels stay legible.
+                figH = max(320, 36 * n + 120);
+                fig = figure('Visible','off','Color','w', ...
+                    'Position',[0 0 980 figH], 'PaperPositionMode','auto');
+                cleanup = onCleanup(@() close(fig)); %#ok<NASGU>
+                ax = axes(fig); %#ok<LAXES>
+                b = barh(ax, rates, 'FaceColor', [0.706 0.325 0.035], ...
+                    'EdgeColor', 'none'); %#ok<NASGU>
+                set(ax, 'YTick', 1:n, 'YTickLabel', labels, 'YDir', 'reverse', ...
+                    'Color', 'w', 'XColor', [0.122 0.161 0.216], ...
+                    'YColor', [0.122 0.161 0.216], 'FontSize', 10);
+                xlim(ax, [0 100]);
+                xlabel(ax, 'Pass rate (%)', 'Color', [0.122 0.161 0.216]);
+                title(ax, 'Pass Rate per Source File', ...
+                    'Color', [0.122 0.161 0.216], 'FontSize', 14, 'FontWeight','bold');
+                grid(ax, 'on');
+                ax.GridColor = [0.7 0.7 0.7];
+                pngPath = [tempname() '.png'];
+                print(fig, pngPath, '-dpng', '-r150');
+            catch ME
+                warning('autotest:report:barRender', ...
+                    'renderBarChart failed: %s', ME.message);
+                pngPath = '';
+            end
         end
     end
 end

@@ -10,4 +10,24 @@ slprj/
 tmp_*/
 
 # autotestGUI / autotest.runWorkflow output (generated tests, reports,
-# lo
+# logs, charts, audit sidecars).  The whole _autotest/ tree under any
+# project the tool has touched is regenerated on every run.
+_autotest/
+examples/_autotest/
+
+# Native system test report deliverables (live under _autotest/reports/).
+# Keep them ignored at the root too in case a future cycle ever copies a
+# canonical .docx out of _autotest/ into the repo root by accident.
+*.docx
+*.pdf
+*_audit.txt
+
+# Per-cycle scratch (one-off triage / debug / verification scripts that
+# accumulated under the repo root in earlier phases).  v1.4 cleaned these
+# up; the patterns stay so they cannot leak back in.
+_phase*
+phase17_*
+debug_phase*.m
+*_phase6_*
+triage_*.md
+verify_*.m
