@@ -36,8 +36,16 @@ function info = runWorkflow(folder, varargin)
     p.addParameter('Verbose', false, @islogical);
     % Phase 15: auto-render the native system test report
     % (autotest.generateSystemTestReport) immediately after the JUnit
-    % summary is emitted.  Default OFF to preserve existing callers.
-    p.addParameter('GenerateReport', false, @islogical);
+    % summary is emitted.
+    % v1.5: default flipped to TRUE.  The .html deliverable (added in
+    % v1.5) has zero MATLAB Report Generator dependency and is best-
+    % effort under the hood, so making it the default behaviour means
+    % users who run `autotest.runWorkflow(folder)` without options
+    % still get a viewable report -- the previous OFF-by-default was
+    % the most common reason no report appeared on a work machine.
+    % Pass 'GenerateReport', false explicitly to opt out (e.g. in CI
+    % pipelines that only need the JUnit XML).
+    p.addParameter('GenerateReport', true, @islogical);
     p.addParameter('ReportOptions',  struct(), @isstruct);
     p.parse(folder, varargin{:});
     r = p.Results;
@@ -240,7 +248,10 @@ function info = runWorkflow(folder, varargin)
             else
                 info.AuditSidecar = '';
             end
-            fprintf('Wrote %s (backend: %s)\n', reportInfo.DocxPath, reportInfo.BackendDisplay);
+            if ~isempty(reportInfo.DocxPath)
+                fprintf('Wrote %s (backend: %s)\n', ...
+                    reportInfo.DocxPath, reportInfo.BackendDisplay);
+            end
             if ~isempty(reportInfo.PdfPath)
                 fprintf('Wrote %s\n', reportInfo.PdfPath);
             end
@@ -250,9 +261,18 @@ function info = runWorkflow(folder, varargin)
             if ~isempty(info.AuditSidecar)
                 fprintf('Wrote %s\n', info.AuditSidecar);
             end
+            % v1.5: append the report-status block to summary.txt so the
+            % paths (or "(not produced)" diagnostic) are durable on disk,
+            % not just in the live console output the operator may have
+            % already scrolled past.
+            appendReportStatus(summaryFile, info, reportInfo);
         catch ME
             warning('autotest:GenerateReport', ...
-                'Native report generation failed: %s', ME.message);
+                'Native report generation failed: %s\n%s', ME.message, ...
+                getReport(ME, 'extended', 'hyperlinks', 'off'));
+            % Still annotate summary.txt so the operator can see the
+            % run reached the report stage and what blew up.
+            appendReportFailure(summaryFile, ME);
         end
     end
 end
@@ -544,6 +564,55 @@ end
 function mkdirIfMissing(d)
     if ~isfolder(d)
         mkdir(d);
+    end
+end
+
+function appendReportStatus(summaryFile, info, reportInfo)
+    %APPENDREPORTSTATUS  v1.5 -- write the report-stage paths into summary.txt.
+    %   The original summary.txt only carries per-source breakdown.  When
+    %   the report stage runs (now ON by default), the deliverable paths
+    %   land in the live console -- which an operator may have already
+    %   scrolled past.  Appending them to summary.txt makes the paths
+    %   durable on disk so triage is one `type summary.txt` away.
+    fid = fopen(summaryFile, 'a');
+    if fid < 3, return; end
+    cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '\nReport stage\n');
+    fprintf(fid,   '------------\n');
+    if isfield(info, 'ReportHtmlPath') && ~isempty(info.ReportHtmlPath)
+        fprintf(fid, 'HTML:    %s\n', info.ReportHtmlPath);
+    else
+        fprintf(fid, 'HTML:    (not produced)\n');
+    end
+    if isfield(reportInfo, 'DocxPath') && ~isempty(reportInfo.DocxPath)
+        fprintf(fid, 'Docx:    %s\n', reportInfo.DocxPath);
+    else
+        fprintf(fid, 'Docx:    (not produced)\n');
+    end
+    if isfield(reportInfo, 'PdfPath') && ~isempty(reportInfo.PdfPath)
+        fprintf(fid, 'Pdf:     %s\n', reportInfo.PdfPath);
+    else
+        fprintf(fid, 'Pdf:     (no PDF tier on this machine)\n');
+    end
+    if isfield(info, 'AuditSidecar') && ~isempty(info.AuditSidecar)
+        fprintf(fid, 'Sidecar: %s\n', info.AuditSidecar);
+    end
+    if isfield(reportInfo, 'BackendDisplay')
+        fprintf(fid, 'Backend: %s\n', reportInfo.BackendDisplay);
+    end
+end
+
+function appendReportFailure(summaryFile, ME)
+    fid = fopen(summaryFile, 'a');
+    if fid < 3, return; end
+    cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '\nReport stage\n');
+    fprintf(fid,   '------------\n');
+    fprintf(fid, 'FAILED: %s\n', ME.message);
+    try
+        rpt = getReport(ME, 'extended', 'hyperlinks', 'off');
+        fprintf(fid, '%s\n', rpt);
+    catch
     end
 end
 

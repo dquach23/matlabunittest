@@ -83,57 +83,67 @@ classdef ReportBuilder
                 'ProjectPrefix', opts.ProjectPrefix, ...
                 'Audit',         audit);
 
-            % Emit the cover page, TOC, body, appendices.
-            % v1.4: cover() consolidated into SectionBuilder so the
-            % former +autotest/+report/CoverPage.m can be retired.
             ctxOpts = autotest.report.ReportBuilder.coverFields(opts, data);
-            autotest.report.SectionBuilder.cover(backend, ctxOpts);
-            backend.addTOC('Table of Contents');
-            autotest.report.SectionBuilder.emit(backend, ctx);
-            backend.close();
 
-            % v1.3 Part B item 2: self-attesting embedded sha256.
-            % SectionBuilder.appendixE wrote the sentinel
-            % `__DOCX_SHA256_SLOT__` into Appendix E.5; now that the
-            % .docx is on disk, compute its sha256, unzip, substitute
-            % the sentinel for the hex, and re-zip.  The inline value
-            % is the pre-substitution hash; reviewers can verify it
-            % by reverting the substitution.  Best-effort: failures
-            % are non-fatal -- the sentinel just stays in the
-            % document and the sidecar still carries the
-            % post-substitution hash.
-            try
-                autotest.report.ReportBuilder.embedSelfChecksum(docxPath);
-            catch
-            end
-
-            % Render PDF if requested.
-            generatedPdfPath = '';
-            if ~strcmpi(opts.PdfBackend, 'none')
-                generatedPdfPath = autotest.report.ReportBuilder.tryRenderPdf( ...
-                    backend, docxPath, pdfPath, opts.PdfBackend, detector);
-            end
-
-            % v1.5: also render the self-contained HTML deliverable.
-            % HtmlBackend has zero MATLAB Report Generator dependency
-            % and ships inline-SVG charts, so it always succeeds even
-            % on machines where docx assembly hits a snag.  Best-effort:
-            % a failure here never blocks the docx flow.
+            % v1.5 (resilience fix): emit HTML FIRST, independent of the
+            % docx path.  HtmlBackend has zero Report Generator dependency,
+            % pure-string SVG chart generation (no figure() / pie() / barh()
+            % calls), and is the deliverable most reliably viewable on
+            % locked-down work machines.  Wrapping it ahead of the docx
+            % means that even if backend.close() throws on the docx side
+            % (OOXML zip corruption, OneDrive lock, etc.), the HTML
+            % still lands on disk.  Best-effort: failure here logs a
+            % warning and lets the docx flow proceed.
             generatedHtmlPath = '';
             if opts.GenerateHtml
                 try
                     htmlBackend = autotest.report.backends.HtmlBackend( ...
                         htmlPath, opts.Classification);
-                    ctxOptsHtml = autotest.report.ReportBuilder.coverFields(opts, data);
-                    autotest.report.SectionBuilder.cover(htmlBackend, ctxOptsHtml);
+                    autotest.report.SectionBuilder.cover(htmlBackend, ctxOpts);
                     htmlBackend.addTOC('Table of Contents');
                     autotest.report.SectionBuilder.emit(htmlBackend, ctx);
                     htmlBackend.close();
                     generatedHtmlPath = htmlPath;
                 catch htmlME
                     warning('autotest:report:Html', ...
-                        'HTML report skipped: %s', htmlME.message);
+                        'HTML report skipped: %s\n%s', htmlME.message, ...
+                        getReport(htmlME, 'extended', 'hyperlinks', 'off'));
                 end
+            end
+
+            % v1.5 (resilience fix): wrap the entire docx flow in a
+            % try/catch so a docx-side failure doesn't tank the run.
+            % The HTML is already on disk by this point, and the
+            % sidecar (below) still emits whatever checksums it can.
+            generatedDocxPath = '';
+            generatedPdfPath  = '';
+            try
+                % Emit the cover page, TOC, body, appendices.
+                % v1.4: cover() consolidated into SectionBuilder so the
+                % former +autotest/+report/CoverPage.m can be retired.
+                autotest.report.SectionBuilder.cover(backend, ctxOpts);
+                backend.addTOC('Table of Contents');
+                autotest.report.SectionBuilder.emit(backend, ctx);
+                backend.close();
+                generatedDocxPath = docxPath;
+
+                % v1.3 Part B item 2: self-attesting embedded sha256.
+                % Best-effort: failures leave the sentinel in place;
+                % the sidecar still carries the post-write hash.
+                try
+                    autotest.report.ReportBuilder.embedSelfChecksum(docxPath);
+                catch
+                end
+
+                % Render PDF if requested.
+                if ~strcmpi(opts.PdfBackend, 'none')
+                    generatedPdfPath = autotest.report.ReportBuilder.tryRenderPdf( ...
+                        backend, docxPath, pdfPath, opts.PdfBackend, detector);
+                end
+            catch docxME
+                warning('autotest:report:Docx', ...
+                    'Docx report skipped: %s\n%s', docxME.message, ...
+                    getReport(docxME, 'extended', 'hyperlinks', 'off'));
             end
 
             % Phase 16 (Part B item 7): write the audit sidecar AFTER
@@ -152,7 +162,7 @@ classdef ReportBuilder
             end
 
             info = struct( ...
-                'DocxPath',       docxPath, ...
+                'DocxPath',       generatedDocxPath, ...
                 'PdfPath',        generatedPdfPath, ...
                 'HtmlPath',       generatedHtmlPath, ...
                 'BackendLogPath', backendLog, ...
