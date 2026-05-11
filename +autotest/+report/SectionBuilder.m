@@ -270,10 +270,18 @@ classdef SectionBuilder
             % incomplete.  Best-effort -- any failure here just skips
             % the chart and continues with the existing tabular data.
             try
-                pngPie = autotest.report.SectionBuilder.renderPieChart( ...
-                    s.GenPassed, s.GenFailed, s.GenIncomplete);
-                if ~isempty(pngPie)
-                    backend.addImage(pngPie, 5400, 4500); % ~3.75" x 3.13"
+                if ismethod(backend, 'addSvgChart')
+                    svg = autotest.report.backends.HtmlBackend.pieChartSvg( ...
+                        s.GenPassed, s.GenFailed, s.GenIncomplete);
+                    if ~isempty(svg)
+                        backend.addSvgChart(svg);
+                    end
+                else
+                    pngPie = autotest.report.SectionBuilder.renderPieChart( ...
+                        s.GenPassed, s.GenFailed, s.GenIncomplete);
+                    if ~isempty(pngPie)
+                        backend.addImage(pngPie, 5400, 4500); % ~3.75" x 3.13"
+                    end
                 end
             catch ME
                 warning('autotest:report:pie', 'Pie chart skipped: %s', ME.message);
@@ -315,11 +323,18 @@ classdef SectionBuilder
             % B.1; rendered at 150 DPI and embedded inline above the
             % per-source narrative.  Best-effort.
             try
-                pngBar = autotest.report.SectionBuilder.renderBarChart(d.PerSource);
-                if ~isempty(pngBar)
-                    n = numel(d.PerSource);
-                    heightDxa = max(2400, 480 * n + 960);
-                    backend.addImage(pngBar, 8400, heightDxa);
+                if ismethod(backend, 'addSvgChart')
+                    svg = autotest.report.backends.HtmlBackend.barChartSvg(d.PerSource);
+                    if ~isempty(svg)
+                        backend.addSvgChart(svg);
+                    end
+                else
+                    pngBar = autotest.report.SectionBuilder.renderBarChart(d.PerSource);
+                    if ~isempty(pngBar)
+                        n = numel(d.PerSource);
+                        heightDxa = max(2400, 480 * n + 960);
+                        backend.addImage(pngBar, 8400, heightDxa);
+                    end
                 end
             catch ME
                 warning('autotest:report:bar', 'Bar chart skipped: %s', ME.message);

@@ -530,11 +530,20 @@ classdef InputSampler
         end
 
         function s = makeCase(label, callExpr, kind)
-            s = struct('Label', label, 'Expr', callExpr, 'Kind', kind, 'Args', {{}});
+            % v1.5: DropStatefulWrap and AnnotateArgs are optional flags
+            % set by TestWriter substitution passes (applyLiveKey/
+            % applyContainer/markDropStatefulWrap/tryDomFullFixtureSmoke).
+            % Initialising them here keeps the struct shape uniform across
+            % every case so `smart(s) = applied(s)` never trips
+            % "Subscripted assignment between dissimilar structures."
+            s = struct('Label', label, 'Expr', callExpr, 'Kind', kind, ...
+                'Args', {{}}, 'DropStatefulWrap', false, ...
+                'AnnotateArgs', false);
         end
 
         function s = emptyCase()
-            s = struct('Label', {}, 'Expr', {}, 'Kind', {}, 'Args', {});
+            s = struct('Label', {}, 'Expr', {}, 'Kind', {}, 'Args', {}, ...
+                'DropStatefulWrap', {}, 'AnnotateArgs', {});
         end
     end
 

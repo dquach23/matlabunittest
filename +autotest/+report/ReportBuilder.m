@@ -41,6 +41,7 @@ classdef ReportBuilder
             base = autotest.report.ReportBuilder.outputBaseName(folder, opts);
             docxPath = fullfile(outputDir, [base '_TestReport.docx']);
             pdfPath = fullfile(outputDir, [base '_TestReport.pdf']);
+            htmlPath = fullfile(outputDir, [base '_TestReport.html']);
 
             % If the docx is currently open in Word, rename it out of the
             % way so the rebuild succeeds.
@@ -113,6 +114,28 @@ classdef ReportBuilder
                     backend, docxPath, pdfPath, opts.PdfBackend, detector);
             end
 
+            % v1.5: also render the self-contained HTML deliverable.
+            % HtmlBackend has zero MATLAB Report Generator dependency
+            % and ships inline-SVG charts, so it always succeeds even
+            % on machines where docx assembly hits a snag.  Best-effort:
+            % a failure here never blocks the docx flow.
+            generatedHtmlPath = '';
+            if opts.GenerateHtml
+                try
+                    htmlBackend = autotest.report.backends.HtmlBackend( ...
+                        htmlPath, opts.Classification);
+                    ctxOptsHtml = autotest.report.ReportBuilder.coverFields(opts, data);
+                    autotest.report.SectionBuilder.cover(htmlBackend, ctxOptsHtml);
+                    htmlBackend.addTOC('Table of Contents');
+                    autotest.report.SectionBuilder.emit(htmlBackend, ctx);
+                    htmlBackend.close();
+                    generatedHtmlPath = htmlPath;
+                catch htmlME
+                    warning('autotest:report:Html', ...
+                        'HTML report skipped: %s', htmlME.message);
+                end
+            end
+
             % Phase 16 (Part B item 7): write the audit sidecar AFTER
             % both deliverables exist on disk.  Carries the post-write
             % sha256 of the .docx and .pdf so an Authority's reviewer
@@ -131,6 +154,7 @@ classdef ReportBuilder
             info = struct( ...
                 'DocxPath',       docxPath, ...
                 'PdfPath',        generatedPdfPath, ...
+                'HtmlPath',       generatedHtmlPath, ...
                 'BackendLogPath', backendLog, ...
                 'BackendName',    detector.BackendName, ...
                 'BackendDisplay', detector.BackendDisplay, ...
@@ -526,6 +550,13 @@ classdef ReportBuilder
             % so existing callers see the green banner without any change.
             if ~isfield(opts, 'Classification') || isempty(opts.Classification)
                 opts.Classification = 'UNCLASSIFIED';
+            end
+            % v1.5: HTML deliverable defaults ON.  It has no runtime
+            % dependency on Report Generator, ships inline-SVG charts,
+            % and is the one report most reliably viewable on locked-
+            % down work machines where Word / .docx handling is finicky.
+            if ~isfield(opts, 'GenerateHtml') || isempty(opts.GenerateHtml)
+                opts.GenerateHtml = true;
             end
         end
 

@@ -61,6 +61,9 @@ function info = generateSystemTestReport(folder, varargin)
     p.addParameter('OutputBaseName', '', @(x) ischar(x) || isstring(x));
     p.addParameter('PdfBackend', 'auto', @(x) ischar(x) || isstring(x));
     p.addParameter('Classification', 'UNCLASSIFIED', @(x) ischar(x) || isstring(x));
+    % v1.5: self-contained HTML deliverable.  Default ON because it
+    % has no Report Generator / Word dependency and ships inline SVG.
+    p.addParameter('GenerateHtml', true, @(x) islogical(x) && isscalar(x));
     p.parse(varargin{:});
 
     opts = struct();

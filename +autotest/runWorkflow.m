@@ -223,6 +223,14 @@ function info = runWorkflow(folder, varargin)
             info.ReportDocxPath = reportInfo.DocxPath;
             info.ReportPdfPath  = reportInfo.PdfPath;
             info.ReportBackend  = reportInfo.BackendDisplay;
+            % v1.5: self-contained HTML deliverable (HtmlBackend).
+            % Always present in the returned struct -- '' when the
+            % user opted out via 'GenerateHtml', false in ReportOptions.
+            if isfield(reportInfo, 'HtmlPath')
+                info.ReportHtmlPath = reportInfo.HtmlPath;
+            else
+                info.ReportHtmlPath = '';
+            end
             % v1.3 Part B item 3: surface the audit sidecar path so
             % callers can `disp(info.AuditSidecar)` after a workflow
             % run.  ReportBuilder.build already writes the sidecar;
@@ -235,6 +243,9 @@ function info = runWorkflow(folder, varargin)
             fprintf('Wrote %s (backend: %s)\n', reportInfo.DocxPath, reportInfo.BackendDisplay);
             if ~isempty(reportInfo.PdfPath)
                 fprintf('Wrote %s\n', reportInfo.PdfPath);
+            end
+            if ~isempty(info.ReportHtmlPath)
+                fprintf('Wrote %s\n', info.ReportHtmlPath);
             end
             if ~isempty(info.AuditSidecar)
                 fprintf('Wrote %s\n', info.AuditSidecar);
@@ -384,7 +395,7 @@ function [results, summary] = runGeneratedTests(testDirs, reportsDir)
     suite = matlab.unittest.Test.empty;
     for i = 1:numel(testDirs)
         d = testDirs{i};
-        if ~isfolder(d), inue; end
+        if ~isfolder(d), continue; end
         try
             sub = TestSuite.fromFolder(d, 'IncludingSubfolders', true);
         catch ME
