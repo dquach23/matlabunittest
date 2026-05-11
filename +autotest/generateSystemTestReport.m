@@ -52,7 +52,7 @@ function info = generateSystemTestReport(folder, varargin)
     p = inputParser();
     p.addParameter('DisplayName', '', @(x) ischar(x) || isstring(x));
     p.addParameter('Owner', '', @(x) ischar(x) || isstring(x));
-    p.addParameter('DocVersion', '1.0', @(x) ischar(x) || isstring(x));
+    p.addParameter('DocVersion', '1.6', @(x) ischar(x) || isstring(x));
     p.addParameter('ProjectPrefix', '', @(x) ischar(x) || isstring(x));
     p.addParameter('DistributionReason', 'Administrative or Operational Use', @(x) ischar(x) || isstring(x));
     p.addParameter('DistributionDate', '', @(x) ischar(x) || isstring(x));

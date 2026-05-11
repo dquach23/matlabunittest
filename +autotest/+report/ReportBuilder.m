@@ -535,7 +535,7 @@ classdef ReportBuilder
                 opts.Owner = ['Project Owner -- ' opts.DisplayName];
             end
             if ~isfield(opts, 'DocVersion') || isempty(opts.DocVersion)
-                opts.DocVersion = '1.0';
+                opts.DocVersion = '1.6';
             end
             if ~isfield(opts, 'ProjectPrefix') || isempty(opts.ProjectPrefix)
                 opts.ProjectPrefix = autotest.report.ReportBuilder.derivePrefix( ...

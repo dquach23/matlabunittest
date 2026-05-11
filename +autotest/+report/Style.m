@@ -68,9 +68,86 @@ classdef Style
 
         % v1.4 accent rule (1pt).
         AccentRuleSize = 8;        % 1pt = 8 eighths-of-a-point in OOXML
+
+        % v1.6 status badges -- coloured pill markers for Pass / Fail /
+        % Incomplete / Skipped statuses, used in the appendix listings
+        % and per-source tables.  Hex pairs are (fill, text).
+        BadgePassFill   = 'D1FAE5'; BadgePassText   = '065F46';
+        BadgeFailFill   = 'FEE2E2'; BadgeFailText   = '991B1B';
+        BadgeIncFill    = 'FEF3C7'; BadgeIncText    = '92400E';
+        BadgeSkipFill   = 'E5E7EB'; BadgeSkipText   = '374151';
+
+        % v1.6 body typography refresh -- serif body, sans-serif headings.
+        BodyFontNameSerif    = 'Georgia';
+        HeadingFontName      = 'Calibri';
+        AltRowShading        = 'F7FAFC';   % light grey for alternating rows
+
+        % v1.6 callout box for executive-summary metrics.
+        CalloutFill          = 'F7FAFC';
+        CalloutBorderColor   = 'B45309';
     end
 
     methods (Static)
+        function [fill, text, label] = statusBadge(status)
+            %STATUSBADGE  v1.6 -- map a test status to its badge palette + label.
+            %   Returns (fillHex, textHex, displayLabel).  Unknown
+            %   statuses fall through to the grey "Skipped" palette
+            %   so the visual still renders.
+            arguments
+                status (1,:) char
+            end
+            s = lower(strtrim(status));
+            switch s
+                case {'passed','pass'}
+                    fill = autotest.report.Style.BadgePassFill;
+                    text = autotest.report.Style.BadgePassText;
+                    label = 'Pass';
+                case {'failed','fail','error','errored'}
+                    fill = autotest.report.Style.BadgeFailFill;
+                    text = autotest.report.Style.BadgeFailText;
+                    label = 'Fail';
+                case {'incomplete','filtered','assumption'}
+                    fill = autotest.report.Style.BadgeIncFill;
+                    text = autotest.report.Style.BadgeIncText;
+                    label = 'Incomplete';
+                case {'skipped','skip'}
+                    fill = autotest.report.Style.BadgeSkipFill;
+                    text = autotest.report.Style.BadgeSkipText;
+                    label = 'Skipped';
+                otherwise
+                    fill = autotest.report.Style.BadgeSkipFill;
+                    text = autotest.report.Style.BadgeSkipText;
+                    label = char(status);
+            end
+        end
+
+        function code = portionCode(level)
+            %PORTIONCODE  v1.6 (DoDI 5200.48 portion markings).
+            %   Returns the parenthetical prefix to prepend on every
+            %   body paragraph and heading under the given classification.
+            %   Unknown levels fall through to (U) (the most permissive
+            %   marking) rather than blocking the run.
+            arguments
+                level (1,:) char
+            end
+            switch upper(strtrim(level))
+                case 'UNCLASSIFIED', code = '(U)';
+                case 'CONFIDENTIAL', code = '(C)';
+                case 'SECRET',       code = '(S)';
+                case 'TOP SECRET',   code = '(TS)';
+                case 'FOUO',         code = '(U//FOUO)';
+                otherwise,           code = '(U)';
+            end
+        end
+
+        function tf = isUnclassified(level)
+            %ISUNCLASSIFIED  v1.6 -- treat UNCLASSIFIED banners as plain text.
+            %   DoDM 5200.01 V2 specifies UNCLASSIFIED markings render as
+            %   plain centred text -- no coloured background block.  Higher
+            %   levels retain the CAPCO-colored block from v1.4.
+            tf = strcmpi(strtrim(level), 'UNCLASSIFIED');
+        end
+
         function hex = classificationFill(level)
             %CLASSIFICATIONFILL  CAPCO per-level banner background colour.
             %

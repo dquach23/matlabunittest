@@ -74,6 +74,10 @@ classdef SectionBuilder
             autotest.report.SectionBuilder.testScope(backend, ctx);
             autotest.report.SectionBuilder.resultsSummary(backend, ctx);
             autotest.report.SectionBuilder.detailedFindings(backend, ctx);
+            % v1.6: Failed Tests section -- one card per failure with
+            % identifier, message, stack excerpt, and plain-English
+            % explanation pattern-matched against known error families.
+            autotest.report.SectionBuilder.failedTests(backend, ctx);
             autotest.report.SectionBuilder.defectRegister(backend, ctx);
             autotest.report.SectionBuilder.coverageRisk(backend, ctx);
             autotest.report.SectionBuilder.recommendations(backend, ctx);
@@ -149,6 +153,21 @@ classdef SectionBuilder
                  'Incomplete user-stub tests into meaningful Pass / Fail signal.  ' ...
                  'See Section 8 (Recommendations) for prioritised next steps.'], ...
                 opts.DisplayName, s.UserTotal));
+            % v1.6 callout strip -- four big-number summary boxes for the
+            % core headline metrics.  Renders inline-block in HTML and as
+            % left-bordered single-cell tables in .docx.  Pure presentation
+            % -- the actual numbers also appear in the Section 4 table.
+            if ismethod(backend, 'addCalloutBox')
+                if s.GenTotal > 0
+                    pctTxt = sprintf('%.1f%%', 100 * s.GenPassed / s.GenTotal);
+                else
+                    pctTxt = 'n/a';
+                end
+                backend.addCalloutBox(num2str(s.GenTotal),   'tests generated');
+                backend.addCalloutBox(num2str(s.GenPassed),  'passed');
+                backend.addCalloutBox(num2str(s.GenFailed),  'failed');
+                backend.addCalloutBox(pctTxt,                'generated pass rate');
+            end
         end
 
         % ====================================================== Section 2
@@ -280,7 +299,10 @@ classdef SectionBuilder
                     pngPie = autotest.report.SectionBuilder.renderPieChart( ...
                         s.GenPassed, s.GenFailed, s.GenIncomplete);
                     if ~isempty(pngPie)
-                        backend.addImage(pngPie, 5400, 4500); % ~3.75" x 3.13"
+                        % v1.6: fill the available content width and
+                        % preserve the 1200x700 source aspect ratio
+                        % (9360 DXA wide => 5460 DXA tall).
+                        backend.addImage(pngPie, 9360, 5460);
                     end
                 end
             catch ME
@@ -332,8 +354,12 @@ classdef SectionBuilder
                     pngBar = autotest.report.SectionBuilder.renderBarChart(d.PerSource);
                     if ~isempty(pngBar)
                         n = numel(d.PerSource);
-                        heightDxa = max(2400, 480 * n + 960);
-                        backend.addImage(pngBar, 8400, heightDxa);
+                        % v1.6: fill content width and scale height
+                        % proportional to the 1400x(48n+160) source.
+                        % heightDxa = 9360 * srcH / 1400.
+                        srcH = max(420, 48 * n + 160);
+                        heightDxa = round(9360 * srcH / 1400);
+                        backend.addImage(pngBar, 9360, heightDxa);
                     end
                 end
             catch ME
@@ -392,6 +418,75 @@ classdef SectionBuilder
         function cls = classNameForFile(file)
             [~, base, ~] = fileparts(file);
             cls = ['t' base];
+        end
+
+        % ====================================================== Section 5.5
+        function failedTests(backend, ctx)
+            %FAILEDTESTS  v1.6 -- one card per failed test with explanation.
+            %
+            %   For each test whose Status is 'failed' or 'error', emit a
+            %   compact card listing: test identifier, the MATLAB error
+            %   identifier extracted from the diagnostic, the headline
+            %   message, a 3-frame stack excerpt, and a plain-English
+            %   explanation pattern-matched against the
+            %   FailureExplainer.knownPatterns table.  Unrecognised
+            %   errors render with a "Cause not classified -- investigate
+            %   manually" hint rather than fabricating a confident-but-
+            %   wrong explanation.  This section sits between Section 5
+            %   (per-source narrative) and the existing Section 6
+            %   (Defect Register) so the operator scans Pass/Fail
+            %   metrics, drills into per-source rows, then sees every
+            %   failure inline before the formal defect catalogue.
+            d = ctx.Data;
+            failed = d.Tests(strcmp({d.Tests.Status}, 'failed') | ...
+                             strcmp({d.Tests.Status}, 'error'));
+            backend.addHeading(1, sprintf('Failed Tests (%d)', numel(failed)));
+            if isempty(failed)
+                backend.addParagraph( ...
+                    ['No tests failed in this cycle.  This section is ' ...
+                     'reserved for per-failure diagnostics + plain-' ...
+                     'English explanations; it stays empty when the ' ...
+                     'cycle is clean.']);
+                return;
+            end
+            backend.addParagraph(sprintf( ...
+                ['This section enumerates every test that returned a ' ...
+                 'Failed or Error disposition in this cycle (%d ' ...
+                 'total).  Each card lists the test identifier, the ' ...
+                 'MATLAB error identifier and headline message, a ' ...
+                 'short stack excerpt, and -- where the autogen ' ...
+                 'recognises the error family -- a plain-English ' ...
+                 'explanation and likely fix.  Unrecognised errors ' ...
+                 'still appear here with their identifier and message ' ...
+                 'verbatim; consult Appendix B for the full diagnostic.'], ...
+                numel(failed)));
+            for i = 1:numel(failed)
+                t = failed(i);
+                [expl, ident, msg, stack] = ...
+                    autotest.report.FailureExplainer.explain(t);
+                info = struct( ...
+                    'Class',       t.Class, ...
+                    'Method',      t.Method, ...
+                    'Identifier',  ident, ...
+                    'Message',     msg, ...
+                    'Stack',       {stack}, ...
+                    'Explanation', expl);
+                if ismethod(backend, 'addFailureCard')
+                    backend.addFailureCard(info);
+                else
+                    % Fallback for backends that predate the failure-card
+                    % method: render as a normal heading + paragraph.
+                    backend.addHeading(3, sprintf('%s.%s', t.Class, t.Method));
+                    if ~isempty(ident), backend.addParagraph(ident); end
+                    backend.addParagraph(msg);
+                    if ~isempty(expl)
+                        backend.addParagraph(['Explanation: ' expl]);
+                    else
+                        backend.addParagraph( ...
+                            'Cause not classified -- investigate manually.');
+                    end
+                end
+            end
         end
 
         % ====================================================== Section 6
@@ -556,7 +651,10 @@ classdef SectionBuilder
                 for j = 1:numel(sub)
                     rows{j,1} = sub(j).Class;
                     rows{j,2} = sub(j).Method;
-                    rows{j,3} = sub(j).Status;
+                    % v1.6: wrap status in [STATUS:<name>] sentinel so
+                    % the backend's cell renderer turns it into a
+                    % coloured pill badge.
+                    rows{j,3} = sprintf('[STATUS:%s]', sub(j).Status);
                     rows{j,4} = sprintf('%.3f', sub(j).DurationS);
                 end
                 if isempty(rows)
@@ -966,54 +1064,76 @@ classdef SectionBuilder
         % ====================================================== v1.4 chart helpers
 
         function pngPath = renderPieChart(passed, failed, incomplete)
-            %RENDERPIECHART  v1.4 (B.1) -- pass/fail/incomplete pie.
-            %   Returns the absolute path to a freshly-written tempfile
-            %   PNG (rendered at 150 DPI), or '' on failure.  Colours
-            %   follow the locked palette: muted gold for passed,
-            %   deep red for failed, slate for incomplete.
+            %RENDERPIECHART  v1.4 (.docx) + v1.6 (300 DPI + value labels).
+            %   Returns the absolute path to a tempfile PNG rendered at
+            %   300 DPI (was 150) with bold percent labels burned onto
+            %   each slice and a legend pinned alongside.  Colours follow
+            %   the locked v1.4 palette: muted gold (passed), deep red
+            %   (failed), slate (incomplete).  '' on failure.
             pngPath = '';
             try
                 vals = double([passed, failed, incomplete]);
                 names = {'Passed','Failed','Incomplete'};
-                % CAPCO/v1.4 palette (RGB on 0-1).
                 colours = [ ...
                     0.706 0.325 0.035; ...   % muted gold #B45309
                     0.600 0.106 0.106; ...   % deep red   #991B1B
                     0.294 0.333 0.388 ];     % slate      #4B5563
+                charcoal = [0.122 0.161 0.216];
                 fig = figure('Visible','off','Color','w', ...
-                    'Position',[0 0 700 560], 'PaperPositionMode','auto');
+                    'Position',[0 0 1200 700], 'PaperPositionMode','auto');
                 cleanup = onCleanup(@() close(fig)); %#ok<NASGU>
-                ax = axes(fig); %#ok<LAXES>
-                if all(vals == 0)
+                ax = axes(fig, 'Units','normalized','Position',[0.04 0.06 0.5 0.86]); %#ok<LAXES>
+                total = sum(vals);
+                if total <= 0
                     h = pie(ax, 1, {'(no tests)'});
                     if numel(h) >= 1 && isgraphics(h(1), 'patch')
                         h(1).FaceColor = colours(3,:);
                     end
                 else
                     nz = vals > 0;
-                    labels = cell(1, sum(nz));
                     nzIdx = find(nz);
+                    pct = 100 * vals(nz) / total;
+                    labels = cell(1, numel(nzIdx));
                     for k = 1:numel(nzIdx)
-                        ix = nzIdx(k);
-                        labels{k} = sprintf('%s (%d)', names{ix}, vals(ix));
+                        labels{k} = sprintf('%.0f%%', pct(k));
                     end
                     h = pie(ax, vals(nz), labels);
-                    % Patch handles are at odd indices (1,3,5,...).
                     nzColours = colours(nz, :);
-                    pIdx = 1;
+                    pIdx = 1; tIdx = 1;
                     for k = 1:numel(h)
                         if isgraphics(h(k), 'patch') && pIdx <= size(nzColours,1)
                             h(k).FaceColor = nzColours(pIdx, :);
                             h(k).EdgeColor = 'w';
-                            h(k).LineWidth = 1.5;
+                            h(k).LineWidth = 2.0;
                             pIdx = pIdx + 1;
+                        elseif isgraphics(h(k), 'text') && tIdx <= numel(pct)
+                            h(k).FontSize = 14;
+                            h(k).FontWeight = 'bold';
+                            h(k).Color = 'w';
+                            % Hide near-0% slice labels so they don't crowd.
+                            if pct(tIdx) < 5, h(k).String = ''; end
+                            tIdx = tIdx + 1;
                         end
                     end
                 end
                 title(ax, 'Test Results Breakdown', ...
-                    'Color', [0.122 0.161 0.216], 'FontSize', 14, 'FontWeight','bold');
+                    'Color', charcoal, 'FontSize', 16, 'FontWeight','bold');
+                % Legend axes -- separate panel on the right with coloured
+                % swatches + counts so the report carries both percent
+                % (on-pie) and raw count (in legend).
+                axL = axes(fig, 'Units','normalized','Position',[0.6 0.1 0.36 0.8], ...
+                    'XLim',[0 1],'YLim',[0 1],'Visible','off'); %#ok<LAXES>
+                y0 = 0.85; dy = 0.16;
+                for k = 1:3
+                    yy = y0 - (k-1)*dy;
+                    rectangle(axL, 'Position',[0.05 yy 0.10 0.07], ...
+                        'FaceColor', colours(k,:), 'EdgeColor','none');
+                    text(axL, 0.20, yy + 0.035, ...
+                        sprintf('%s (%d)', names{k}, vals(k)), ...
+                        'Color', charcoal, 'FontSize', 14, 'FontWeight','normal');
+                end
                 pngPath = [tempname() '.png'];
-                print(fig, pngPath, '-dpng', '-r150');
+                print(fig, pngPath, '-dpng', '-r300');
             catch ME
                 warning('autotest:report:pieRender', ...
                     'renderPieChart failed: %s', ME.message);
@@ -1022,42 +1142,65 @@ classdef SectionBuilder
         end
 
         function pngPath = renderBarChart(perSource)
-            %RENDERBARCHART  v1.4 (B.2) -- pass-rate per source bar chart.
-            %   Renders a horizontal bar chart with one bar per source,
-            %   each bar coloured muted gold accent.  Returns the
-            %   tempfile PNG path or '' on failure.
+            %RENDERBARCHART  v1.4 (.docx) + v1.6 (300 DPI + value labels).
+            %   Pass-rate per source as a horizontal bar chart at 300 DPI
+            %   with right-of-bar percent labels in charcoal and a
+            %   muted-gold bar fill matching the locked palette.
             pngPath = '';
             try
                 if isempty(perSource), return; end
                 n = numel(perSource);
                 rates = zeros(1, n);
                 labels = cell(1, n);
+                counts = strings(1, n);
                 for i = 1:n
                     p = perSource(i);
                     labels{i} = char(p.File);
                     if p.Total > 0
                         rates(i) = 100 * p.Passed / p.Total;
                     end
+                    counts(i) = sprintf('%d / %d', p.Passed, p.Total);
                 end
-                % Figure height scales with number of sources so labels stay legible.
-                figH = max(320, 36 * n + 120);
+                gold     = [0.706 0.325 0.035];
+                charcoal = [0.122 0.161 0.216];
+                slate    = [0.294 0.333 0.388];
+                figH = max(420, 48 * n + 160);
                 fig = figure('Visible','off','Color','w', ...
-                    'Position',[0 0 980 figH], 'PaperPositionMode','auto');
+                    'Position',[0 0 1400 figH], 'PaperPositionMode','auto');
                 cleanup = onCleanup(@() close(fig)); %#ok<NASGU>
-                ax = axes(fig); %#ok<LAXES>
-                b = barh(ax, rates, 'FaceColor', [0.706 0.325 0.035], ...
-                    'EdgeColor', 'none'); %#ok<NASGU>
+                ax = axes(fig, 'Units','normalized', ...
+                    'Position',[0.30 0.10 0.55 0.82]); %#ok<LAXES>
+                barh(ax, rates, 'FaceColor', gold, 'EdgeColor', 'none', ...
+                    'BarWidth', 0.7);
                 set(ax, 'YTick', 1:n, 'YTickLabel', labels, 'YDir', 'reverse', ...
-                    'Color', 'w', 'XColor', [0.122 0.161 0.216], ...
-                    'YColor', [0.122 0.161 0.216], 'FontSize', 10);
-                xlim(ax, [0 100]);
-                xlabel(ax, 'Pass rate (%)', 'Color', [0.122 0.161 0.216]);
+                    'Color', 'w', 'XColor', charcoal, ...
+                    'YColor', charcoal, 'FontSize', 11, ...
+                    'TickLength', [0 0], 'Box', 'off');
+                xlim(ax, [0 105]);
+                xlabel(ax, 'Pass rate (%)', 'Color', charcoal, 'FontSize', 12);
                 title(ax, 'Pass Rate per Source File', ...
-                    'Color', [0.122 0.161 0.216], 'FontSize', 14, 'FontWeight','bold');
+                    'Color', charcoal, 'FontSize', 16, 'FontWeight','bold');
                 grid(ax, 'on');
-                ax.GridColor = [0.7 0.7 0.7];
+                ax.GridColor = [0.82 0.82 0.82];
+                ax.XGrid = 'on'; ax.YGrid = 'off';
+                % Right-of-bar value labels (percent + raw count).
+                for i = 1:n
+                    text(ax, rates(i) + 1.5, i, ...
+                        sprintf('%.1f%%   %s', rates(i), counts(i)), ...
+                        'Color', charcoal, 'FontSize', 11, ...
+                        'VerticalAlignment','middle', ...
+                        'HorizontalAlignment','left');
+                end
+                % Caption under axes -- explicit "muted gold = passed"
+                % gloss so a reader who skims the legend-less bar still
+                % knows what they're looking at.
+                annotation(fig, 'textbox', [0.30 0.02 0.55 0.05], ...
+                    'String', sprintf( ...
+                        'Bar = passed / total tests per source.  N = %d sources.', n), ...
+                    'Color', slate, 'FontSize', 10, ...
+                    'EdgeColor', 'none', 'HorizontalAlignment','left');
                 pngPath = [tempname() '.png'];
-                print(fig, pngPath, '-dpng', '-r150');
+                print(fig, pngPath, '-dpng', '-r300');
             catch ME
                 warning('autotest:report:barRender', ...
                     'renderBarChart failed: %s', ME.message);
