@@ -36,8 +36,9 @@ classdef Style
         H1FontSize    = 32;        % 16pt
         H2FontSize    = 28;        % 14pt
         H3FontSize    = 24;        % 12pt
-        TitleFontSize    = 96;     % 48pt -- v1.4 cover-page refresh (was 72/36pt)
-        SubtitleFontSize = 36;     % 18pt -- v1.4 cover-page refresh (was 48/24pt)
+        TitleFontSize    = 112;    % 56pt -- v1.7 cover-page redesign (was 96/48pt)
+        SubtitleFontSize = 32;     % 16pt -- v1.7 cover-page redesign (was 36/18pt)
+        MonogramFontSize = 56;     % 28pt -- v1.7 cover-page monogram
         FooterFontSize   = 18;     % 9pt
         BannerFontSize   = 22;     % 11pt -- classification banner
         CodeFontSize     = 20;     % 10pt -- monospace diagnostic samples
@@ -88,6 +89,51 @@ classdef Style
     end
 
     methods (Static)
+        function levels = allowedClassifications()
+            %ALLOWEDCLASSIFICATIONS  v1.7 -- single source of truth for valid Classification values.
+            %   Returns the canonical, ordered set of allowed
+            %   classification levels.  Callers (runWorkflow,
+            %   generateReport, generateSystemTestReport) validate user
+            %   input against this list and error fail-loud with the
+            %   list printed when an unrecognised level is supplied.
+            %   Add new levels here ONLY -- the marking helpers
+            %   (portionCode, classificationFill, isUnclassified) all
+            %   key off these strings.
+            levels = { ...
+                'UNCLASSIFIED', ...
+                'UNCLASSIFIED//FOUO', ...
+                'CONFIDENTIAL', ...
+                'SECRET', ...
+                'TOP SECRET', ...
+                'TOP SECRET//SCI'};
+        end
+
+        function out = validateClassification(level)
+            %VALIDATECLASSIFICATION  v1.7 -- normalise + enforce the allowed set.
+            %   Returns the normalised (uppercase, trimmed) classification
+            %   level when LEVEL is in the allowed list.  Errors fail-
+            %   loud with the full allowed list printed when not.  An
+            %   empty/missing input is treated as UNCLASSIFIED (the
+            %   v1.4 default behaviour).
+            if isstring(level), level = char(level); end
+            if isempty(level)
+                out = 'UNCLASSIFIED';
+                return;
+            end
+            normalised = upper(strtrim(char(level)));
+            allowed = autotest.report.Style.allowedClassifications();
+            if ~any(strcmp(allowed, normalised))
+                error('autotest:report:BadClassification', ...
+                    ['Classification "%s" is not in the allowed set.\n' ...
+                     '  Allowed values (case-insensitive):\n    %s\n' ...
+                     '  Default when not specified: UNCLASSIFIED.\n' ...
+                     '  Example: autotest.runWorkflow(folder, ''ReportOptions'', ' ...
+                     'struct(''Classification'', ''SECRET''))'], ...
+                    char(level), strjoin(allowed, ', '));
+            end
+            out = normalised;
+        end
+
         function [fill, text, label] = statusBadge(status)
             %STATUSBADGE  v1.6 -- map a test status to its badge palette + label.
             %   Returns (fillHex, textHex, displayLabel).  Unknown
@@ -122,53 +168,65 @@ classdef Style
         end
 
         function code = portionCode(level)
-            %PORTIONCODE  v1.6 (DoDI 5200.48 portion markings).
+            %PORTIONCODE  v1.6 / v1.7 (DoDI 5200.48 portion markings).
             %   Returns the parenthetical prefix to prepend on every
             %   body paragraph and heading under the given classification.
-            %   Unknown levels fall through to (U) (the most permissive
-            %   marking) rather than blocking the run.
+            %   v1.7 adds explicit handling for the //FOUO and //SCI
+            %   compound markings.  Unknown levels fall through to (U).
             arguments
                 level (1,:) char
             end
             switch upper(strtrim(level))
-                case 'UNCLASSIFIED', code = '(U)';
-                case 'CONFIDENTIAL', code = '(C)';
-                case 'SECRET',       code = '(S)';
-                case 'TOP SECRET',   code = '(TS)';
-                case 'FOUO',         code = '(U//FOUO)';
-                otherwise,           code = '(U)';
+                case 'UNCLASSIFIED',         code = '(U)';
+                case 'UNCLASSIFIED//FOUO',   code = '(U//FOUO)';
+                case 'CONFIDENTIAL',         code = '(C)';
+                case 'SECRET',               code = '(S)';
+                case 'TOP SECRET',           code = '(TS)';
+                case 'TOP SECRET//SCI',      code = '(TS//SCI)';
+                case 'FOUO',                 code = '(U//FOUO)';
+                otherwise,                   code = '(U)';
             end
         end
 
         function tf = isUnclassified(level)
-            %ISUNCLASSIFIED  v1.6 -- treat UNCLASSIFIED banners as plain text.
-            %   DoDM 5200.01 V2 specifies UNCLASSIFIED markings render as
-            %   plain centred text -- no coloured background block.  Higher
-            %   levels retain the CAPCO-colored block from v1.4.
-            tf = strcmpi(strtrim(level), 'UNCLASSIFIED');
+            %ISUNCLASSIFIED  v1.6 / v1.7 -- plain-text banner for U / U//FOUO.
+            %   DoDM 5200.01 V2 specifies UNCLASSIFIED (and U//FOUO when
+            %   FOUO is the only handling caveat) renders as plain centred
+            %   text -- no coloured background block.  Higher tiers retain
+            %   the CAPCO-coloured banner.
+            n = upper(strtrim(level));
+            tf = strcmp(n, 'UNCLASSIFIED') || strcmp(n, 'UNCLASSIFIED//FOUO');
+        end
+
+        function hex = classificationBannerText(level)
+            %CLASSIFICATIONBANNERTEXT  v1.7 -- text colour to pair with the fill.
+            %   Returns '000000' (black) when the fill is a light/bright
+            %   colour where white text fails contrast (TOP SECRET//SCI's
+            %   CAPCO yellow), otherwise 'FFFFFF' (white).
+            switch upper(strtrim(level))
+                case 'TOP SECRET//SCI', hex = '000000';
+                otherwise,              hex = 'FFFFFF';
+            end
         end
 
         function hex = classificationFill(level)
             %CLASSIFICATIONFILL  CAPCO per-level banner background colour.
-            %
-            %   Returns the 6-char RGB hex (no '#') for the classification
-            %   banner background.  v1.4 introduced a single locked colour
-            %   map keyed off the Classification ReportOption so the
-            %   banner cannot drift cycle-over-cycle.
-            %
-            %   Per CAPCO marking guidance the banner text is white; the
-            %   background is the per-level colour below.  Unknown levels
-            %   fall back to charcoal so the banner still renders.
+            %   Used only for non-UNCLASSIFIED tiers (UNCLASSIFIED and
+            %   UNCLASSIFIED//FOUO render plain-text per DoDM 5200.01 V2).
+            %   v1.7 extends the v1.4 map: TOP SECRET//SCI -> CAPCO yellow,
+            %   the legacy 'FOUO' fallback retained for back-compat.
             arguments
                 level (1,:) char
             end
             switch upper(strtrim(level))
-                case 'UNCLASSIFIED', hex = '007A33';   % CAPCO green
-                case 'CONFIDENTIAL', hex = '0033A0';   % CAPCO blue
-                case 'SECRET',       hex = 'C8102E';   % CAPCO red
-                case 'TOP SECRET',   hex = 'FF8C00';   % CAPCO orange
-                case 'FOUO',         hex = '000000';   % CAPCO black
-                otherwise,           hex = '1F2937';   % charcoal fallback
+                case 'UNCLASSIFIED',         hex = '007A33';   % CAPCO green (legacy; not used post-v1.6)
+                case 'UNCLASSIFIED//FOUO',   hex = '007A33';   % (legacy; not used post-v1.6)
+                case 'CONFIDENTIAL',         hex = '0033A0';   % CAPCO blue
+                case 'SECRET',               hex = 'C8102E';   % CAPCO red
+                case 'TOP SECRET',           hex = 'FF8C00';   % CAPCO orange
+                case 'TOP SECRET//SCI',      hex = 'FCE300';   % CAPCO yellow
+                case 'FOUO',                 hex = '000000';   % CAPCO black (legacy)
+                otherwise,                   hex = '1F2937';   % charcoal fallback
             end
         end
     end

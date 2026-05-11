@@ -180,9 +180,30 @@ function info = runWorkflow(folder, varargin)
     [results, summary] = runGeneratedTests({generatedDir, userTestsDir}, reportsDir);
 
     % ── Write summary report ─────────────────────────────────────────────
+    % v1.7: classification is validated up front so a typo at the
+    % boundary fails loud (printing the allowed set) rather than
+    % silently rendering a charcoal-fallback banner.  The normalised
+    % value flows through into both the summary.txt header line and
+    % the downstream report-stage ReportOptions struct.
+    classificationForSummary = '';
+    if r.GenerateReport
+        rawCls = '';
+        if isstruct(r.ReportOptions) && isfield(r.ReportOptions, 'Classification')
+            rawCls = char(r.ReportOptions.Classification);
+        end
+        try
+            classificationForSummary = ...
+                autotest.report.Style.validateClassification(rawCls);
+            r.ReportOptions.Classification = classificationForSummary;
+        catch ME
+            % Re-raise with the same identifier so callers can catch
+            % autotest:report:BadClassification specifically.
+            rethrow(ME);
+        end
+    end
     summaryFile = fullfile(reportsDir, 'summary.txt');
     writeSummary(summaryFile, folder, outRoot, timestamp, sources, ...
-        results, summary, genErrors);
+        results, summary, genErrors, classificationForSummary);
 
     fprintf('===== run complete =====\n');
     fprintf('Total: %d  Passed: %d  Failed: %d  Incomplete: %d  Duration: %.2fs\n', ...
@@ -475,10 +496,18 @@ function [results, summary] = runGeneratedTests(testDirs, reportsDir)
         'UserStubIncomplete',   sum([usr.Incomplete]));
 end
 
-function writeSummary(file, folder, outRoot, timestamp, sources, results, summary, genErrors)
+function writeSummary(file, folder, outRoot, timestamp, sources, results, summary, genErrors, classification)
+    if nargin < 9, classification = ''; end
     lines = strings(0,1);
     lines(end+1,1) = "autotest run summary";
     lines(end+1,1) = "====================";
+    if ~isempty(classification)
+        % v1.7: surface the classification at the top so an operator can
+        % see at a glance what the report was marked as.  Driven from
+        % the validated ReportOptions.Classification supplied to
+        % autotest.runWorkflow / autotest.generateReport.
+        lines(end+1,1) = sprintf("Classification:   %s", classification);
+    end
     lines(end+1,1) = sprintf("Timestamp:        %s", timestamp);
     lines(end+1,1) = sprintf("Project folder:   %s", folder);
     lines(end+1,1) = sprintf("Output root:      %s", outRoot);

@@ -52,12 +52,42 @@ classdef SectionBuilder
                 'Prepared By',       'matlabunittest QA / autotest agent'; ...
                 'Document Version',  opts.DocVersion; ...
                 'Classification',    upper(strtrim(classification))};
+            % v1.7: route the project prefix (e.g. "RR" for
+            % removal_redaction_tool) into the cover-page monogram slot
+            % so the cover gets a small charcoal emblem at top-left.
+            monogram = '';
+            if isfield(opts, 'ProjectPrefix') && ~isempty(opts.ProjectPrefix)
+                monogram = char(opts.ProjectPrefix);
+            end
             fields = struct( ...
                 'Title',    opts.DisplayName, ...
                 'Subtitle', 'System Test Report', ...
                 'Metadata', {metadata}, ...
-                'AccentRule', true);
+                'AccentRule', true, ...
+                'Monogram',   monogram);
             backend.addCoverPage(fields, distHeader, distBody);
+            % v1.7: bind the running page header (project name +
+            % document version) on backends that expose setPageHeader
+            % (OoxmlBackend).  HtmlBackend has its own banner mechanism;
+            % no-op there.
+            if ismethod(backend, 'setPageHeader')
+                version = '';
+                if isfield(opts, 'DocVersion') && ~isempty(opts.DocVersion)
+                    version = ['v' char(opts.DocVersion)];
+                end
+                backend.setPageHeader(opts.DisplayName, version);
+            end
+        end
+
+        function f = maybeDivider(backend)
+            %MAYBEDIVIDER  v1.7 -- return a closure that emits a section divider when supported.
+            %   Encapsulates the ismethod check so the emit() flow stays
+            %   readable.  No-op on backends that pre-date addSectionDivider.
+            if ismethod(backend, 'addSectionDivider')
+                f = @() backend.addSectionDivider();
+            else
+                f = @() [];
+            end
         end
 
         function v = optOrDefault(opts, name, default)
@@ -69,18 +99,31 @@ classdef SectionBuilder
         end
 
         function emit(backend, ctx)
+            % v1.7: insert lightweight 3-dot section dividers between
+            % major sections.  Helps the eye chunk the document without
+            % needing a page break (which is a heavier visual gesture).
+            divider = autotest.report.SectionBuilder.maybeDivider(backend);
             autotest.report.SectionBuilder.executiveSummary(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.systemUnderTest(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.testScope(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.resultsSummary(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.detailedFindings(backend, ctx);
+            divider();
             % v1.6: Failed Tests section -- one card per failure with
             % identifier, message, stack excerpt, and plain-English
             % explanation pattern-matched against known error families.
             autotest.report.SectionBuilder.failedTests(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.defectRegister(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.coverageRisk(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.recommendations(backend, ctx);
+            divider();
             autotest.report.SectionBuilder.conclusion(backend, ctx);
             backend.addPageBreak();
             autotest.report.SectionBuilder.appendixA(backend, ctx);
@@ -154,19 +197,52 @@ classdef SectionBuilder
                  'See Section 8 (Recommendations) for prioritised next steps.'], ...
                 opts.DisplayName, s.UserTotal));
             % v1.6 callout strip -- four big-number summary boxes for the
-            % core headline metrics.  Renders inline-block in HTML and as
-            % left-bordered single-cell tables in .docx.  Pure presentation
-            % -- the actual numbers also appear in the Section 4 table.
-            if ismethod(backend, 'addCalloutBox')
-                if s.GenTotal > 0
-                    pctTxt = sprintf('%.1f%%', 100 * s.GenPassed / s.GenTotal);
-                else
-                    pctTxt = 'n/a';
+            % core headline metrics.  Renders inline-block in HTML.
+            % v1.7 (.docx): prefer addCalloutRow for horizontal layout
+            % parity with HTML; fall back to per-callout addCalloutBox
+            % on backends that lack the row method.
+            if s.GenTotal > 0
+                pctTxt = sprintf('%.1f%%', 100 * s.GenPassed / s.GenTotal);
+            else
+                pctTxt = 'n/a';
+            end
+            calloutItems = { ...
+                num2str(s.GenTotal),  'tests generated'; ...
+                num2str(s.GenPassed), 'passed'; ...
+                num2str(s.GenFailed), 'failed'; ...
+                pctTxt,               'generated pass rate'};
+            if ismethod(backend, 'addCalloutRow')
+                backend.addCalloutRow(calloutItems);
+            elseif ismethod(backend, 'addCalloutBox')
+                for i = 1:size(calloutItems,1)
+                    backend.addCalloutBox(calloutItems{i,1}, calloutItems{i,2});
                 end
-                backend.addCalloutBox(num2str(s.GenTotal),   'tests generated');
-                backend.addCalloutBox(num2str(s.GenPassed),  'passed');
-                backend.addCalloutBox(num2str(s.GenFailed),  'failed');
-                backend.addCalloutBox(pctTxt,                'generated pass rate');
+            end
+            % v1.7 KPI strip -- single full-width banded row below the
+            % callouts.  Total / pass rate / failure count / run date,
+            % packed glanceably with vertical dividers between values.
+            if ismethod(backend, 'addKpiStrip')
+                runDate = '';
+                if isfield(s, 'Timestamp') && ~isempty(s.Timestamp)
+                    runDate = char(s.Timestamp);
+                end
+                if isempty(runDate)
+                    runDate = char(datetime('now','Format','yyyy-MM-dd'));
+                else
+                    % Compact display form: '20260511-101421' -> '2026-05-11'.
+                    if length(runDate) >= 8
+                        runDate = [runDate(1:4) '-' runDate(5:6) '-' runDate(7:8)];
+                    end
+                end
+                % data.Totals has Passed/Failed/Incomplete/SuiteCount
+                % but no aggregate Total; sum the three for the KPI.
+                totalTests = t.Passed + t.Failed + t.Incomplete;
+                kpiItems = { ...
+                    num2str(totalTests),    'total tests'; ...
+                    pctTxt,                 'pass rate'; ...
+                    num2str(s.GenFailed),   'failures'; ...
+                    runDate,                'run date'};
+                backend.addKpiStrip(kpiItems);
             end
         end
 

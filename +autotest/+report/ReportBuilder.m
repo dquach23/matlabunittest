@@ -110,6 +110,28 @@ classdef ReportBuilder
                         getReport(htmlME, 'extended', 'hyperlinks', 'off'));
                 end
             end
+            % v1.7: canonical section list used by the static TOC.  Word
+            % populates page numbers on first open; this list provides
+            % the labels and ordering in case the underlying field-code
+            % TOC isn't refreshed.
+            tocEntries = { ...
+                '1. Executive Summary',                          ''; ...
+                '2. System Under Test',                          ''; ...
+                '3. Test Scope and Approach',                    ''; ...
+                '4. Test Results Summary',                       ''; ...
+                '5. Detailed Findings by Source File',           ''; ...
+                sprintf('6. Failed Tests (%d)', ...
+                    sum(strcmp({data.Tests.Status},'failed') | ...
+                        strcmp({data.Tests.Status},'error'))),   ''; ...
+                '7. Defect Register',                            ''; ...
+                '8. Coverage and Risk Assessment',               ''; ...
+                '9. Recommendations',                            ''; ...
+                '10. Conclusion',                                ''; ...
+                'Appendix A -- Full Per-Test Result Inventory',  ''; ...
+                'Appendix B -- Defect Log Expansion',            ''; ...
+                'Appendix C -- Methodology Note',                ''; ...
+                'Appendix D -- Glossary',                        ''; ...
+                'Appendix E -- Audit Trail',                     ''};
 
             % v1.5 (resilience fix): wrap the entire docx flow in a
             % try/catch so a docx-side failure doesn't tank the run.
@@ -121,8 +143,17 @@ classdef ReportBuilder
                 % Emit the cover page, TOC, body, appendices.
                 % v1.4: cover() consolidated into SectionBuilder so the
                 % former +autotest/+report/CoverPage.m can be retired.
+                % v1.7: docx uses the static dotted-leader TOC
+                % (addStaticTOC) for readable preview-mode output;
+                % falls back to the field-code TOC on backends that
+                % don't expose addStaticTOC (HtmlBackend already has
+                % its own nav).
                 autotest.report.SectionBuilder.cover(backend, ctxOpts);
-                backend.addTOC('Table of Contents');
+                if ismethod(backend, 'addStaticTOC')
+                    backend.addStaticTOC(tocEntries, 'Table of Contents');
+                else
+                    backend.addTOC('Table of Contents');
+                end
                 autotest.report.SectionBuilder.emit(backend, ctx);
                 backend.close();
                 generatedDocxPath = docxPath;
@@ -535,7 +566,7 @@ classdef ReportBuilder
                 opts.Owner = ['Project Owner -- ' opts.DisplayName];
             end
             if ~isfield(opts, 'DocVersion') || isempty(opts.DocVersion)
-                opts.DocVersion = '1.6';
+                opts.DocVersion = '1.7';
             end
             if ~isfield(opts, 'ProjectPrefix') || isempty(opts.ProjectPrefix)
                 opts.ProjectPrefix = autotest.report.ReportBuilder.derivePrefix( ...
@@ -556,11 +587,15 @@ classdef ReportBuilder
             if ~isfield(opts, 'PdfBackend') || isempty(opts.PdfBackend)
                 opts.PdfBackend = 'auto';
             end
-            % v1.4: CAPCO classification banner.  Defaults to UNCLASSIFIED
-            % so existing callers see the green banner without any change.
+            % v1.4: classification banner level.  Defaults to UNCLASSIFIED.
+            % v1.7: validated against the canonical allowed set so a typo
+            % or unrecognised tier fails fast with the valid list printed,
+            % rather than silently rendering a charcoal fallback banner.
             if ~isfield(opts, 'Classification') || isempty(opts.Classification)
                 opts.Classification = 'UNCLASSIFIED';
             end
+            opts.Classification = autotest.report.Style.validateClassification( ...
+                opts.Classification);
             % v1.5: HTML deliverable defaults ON.  It has no runtime
             % dependency on Report Generator, ships inline-SVG charts,
             % and is the one report most reliably viewable on locked-
