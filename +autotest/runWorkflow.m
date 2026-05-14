@@ -36,8 +36,13 @@ function info = runWorkflow(folder, varargin)
     p.addParameter('Verbose', false, @islogical);
     % Phase 15: auto-render the native system test report
     % (autotest.generateSystemTestReport) immediately after the JUnit
-    % summary is emitted.  Default OFF to preserve existing callers.
-    p.addParameter('GenerateReport', false, @islogical);
+    % summary is emitted.
+    % v1.5 port: default flipped to TRUE.  Users running the bare
+    % `autotest.runWorkflow(folder)` previously got no report at all
+    % because the default was OFF -- the most common surprise on
+    % work machines.  Pass 'GenerateReport', false explicitly to opt
+    % out (e.g. in CI pipelines that only need the JUnit XML).
+    p.addParameter('GenerateReport', true, @islogical);
     p.addParameter('ReportOptions',  struct(), @isstruct);
     p.parse(folder, varargin{:});
     r = p.Results;
@@ -172,9 +177,23 @@ function info = runWorkflow(folder, varargin)
     [results, summary] = runGeneratedTests({generatedDir, userTestsDir}, reportsDir);
 
     % ── Write summary report ─────────────────────────────────────────────
+    % v1.5/v1.7 port: validate the classification up front (so a typo
+    % fails loud rather than silently defaulting), normalise it, and
+    % thread the value into both writeSummary's header line AND the
+    % downstream ReportOptions so the rest of the report stage sees
+    % the same string.
+    classificationForSummary = '';
+    if r.GenerateReport
+        rawCls = '';
+        if isstruct(r.ReportOptions) && isfield(r.ReportOptions, 'Classification')
+            rawCls = char(r.ReportOptions.Classification);
+        end
+        classificationForSummary = validateClassification(rawCls);
+        r.ReportOptions.Classification = classificationForSummary;
+    end
     summaryFile = fullfile(reportsDir, 'summary.txt');
     writeSummary(summaryFile, folder, outRoot, timestamp, sources, ...
-        results, summary, genErrors);
+        results, summary, genErrors, classificationForSummary);
 
     fprintf('===== run complete =====\n');
     fprintf('Total: %d  Passed: %d  Failed: %d  Incomplete: %d  Duration: %.2fs\n', ...
@@ -223,6 +242,15 @@ function info = runWorkflow(folder, varargin)
             info.ReportDocxPath = reportInfo.DocxPath;
             info.ReportPdfPath  = reportInfo.PdfPath;
             info.ReportBackend  = reportInfo.BackendDisplay;
+            % v1.5 port: self-contained HTML deliverable.  Always present
+            % in the returned struct; '' when the underlying ReportBuilder
+            % didn't surface an HtmlPath (e.g. on this branch which lacks
+            % HtmlBackend).
+            if isfield(reportInfo, 'HtmlPath')
+                info.ReportHtmlPath = reportInfo.HtmlPath;
+            else
+                info.ReportHtmlPath = '';
+            end
             % v1.3 Part B item 3: surface the audit sidecar path so
             % callers can `disp(info.AuditSidecar)` after a workflow
             % run.  ReportBuilder.build already writes the sidecar;
@@ -232,16 +260,30 @@ function info = runWorkflow(folder, varargin)
             else
                 info.AuditSidecar = '';
             end
-            fprintf('Wrote %s (backend: %s)\n', reportInfo.DocxPath, reportInfo.BackendDisplay);
+            if ~isempty(reportInfo.DocxPath)
+                fprintf('Wrote %s (backend: %s)\n', ...
+                    reportInfo.DocxPath, reportInfo.BackendDisplay);
+            end
             if ~isempty(reportInfo.PdfPath)
                 fprintf('Wrote %s\n', reportInfo.PdfPath);
+            end
+            if ~isempty(info.ReportHtmlPath)
+                fprintf('Wrote %s\n', info.ReportHtmlPath);
             end
             if ~isempty(info.AuditSidecar)
                 fprintf('Wrote %s\n', info.AuditSidecar);
             end
+            % v1.5 port: persist the report-stage paths into summary.txt.
+            % The live console output the operator may have already
+            % scrolled past; summary.txt is the durable record.
+            appendReportStatus(summaryFile, info, reportInfo);
         catch ME
             warning('autotest:GenerateReport', ...
-                'Native report generation failed: %s', ME.message);
+                'Native report generation failed: %s\n%s', ME.message, ...
+                getReport(ME, 'extended', 'hyperlinks', 'off'));
+            % Annotate summary.txt so the operator can see the run
+            % reached the report stage and what blew up.
+            appendReportFailure(summaryFile, ME);
         end
     end
 end
@@ -384,7 +426,7 @@ function [results, summary] = runGeneratedTests(testDirs, reportsDir)
     suite = matlab.unittest.Test.empty;
     for i = 1:numel(testDirs)
         d = testDirs{i};
-        if ~isfolder(d), inue; end
+        if ~isfolder(d), continue; end
         try
             sub = TestSuite.fromFolder(d, 'IncludingSubfolders', true);
         catch ME
@@ -444,10 +486,16 @@ function [results, summary] = runGeneratedTests(testDirs, reportsDir)
         'UserStubIncomplete',   sum([usr.Incomplete]));
 end
 
-function writeSummary(file, folder, outRoot, timestamp, sources, results, summary, genErrors)
+function writeSummary(file, folder, outRoot, timestamp, sources, results, summary, genErrors, classification)
+    if nargin < 9, classification = ''; end
     lines = strings(0,1);
     lines(end+1,1) = "autotest run summary";
     lines(end+1,1) = "====================";
+    if ~isempty(classification)
+        % v1.5/v1.7 port: surface the classification at the top so an
+        % operator can see at a glance what the report was marked as.
+        lines(end+1,1) = sprintf("Classification:   %s", classification);
+    end
     lines(end+1,1) = sprintf("Timestamp:        %s", timestamp);
     lines(end+1,1) = sprintf("Project folder:   %s", folder);
     lines(end+1,1) = sprintf("Output root:      %s", outRoot);
@@ -533,6 +581,92 @@ end
 function mkdirIfMissing(d)
     if ~isfolder(d)
         mkdir(d);
+    end
+end
+
+function out = validateClassification(level)
+    %VALIDATECLASSIFICATION  v1.5/v1.7 port -- normalise + enforce allowed set.
+    %   Returns the uppercase, trimmed classification when LEVEL is in the
+    %   allowed list.  Empty/missing input defaults to UNCLASSIFIED.  An
+    %   unrecognised level raises 'autotest:report:BadClassification' with
+    %   the allowed list printed so a typo fails loud rather than silently
+    %   rendering a charcoal-fallback banner.
+    %
+    %   Inlined here (instead of delegating to autotest.report.Style) so
+    %   this branch can ship the validation without depending on Style.m
+    %   gaining the v1.7 helper.
+    if isstring(level), level = char(level); end
+    if isempty(level)
+        out = 'UNCLASSIFIED';
+        return;
+    end
+    normalised = upper(strtrim(char(level)));
+    allowed = { ...
+        'UNCLASSIFIED', ...
+        'UNCLASSIFIED//FOUO', ...
+        'FOUO', ...
+        'CONFIDENTIAL', ...
+        'SECRET', ...
+        'TOP SECRET', ...
+        'TOP SECRET//SCI'};
+    if ~any(strcmp(allowed, normalised))
+        error('autotest:report:BadClassification', ...
+            ['Classification "%s" is not in the allowed set.\n' ...
+             '  Allowed values (case-insensitive):\n    %s\n' ...
+             '  Default when not specified: UNCLASSIFIED.\n' ...
+             '  Example: autotest.runWorkflow(folder, ''ReportOptions'', ' ...
+             'struct(''Classification'', ''SECRET''))'], ...
+            char(level), strjoin(allowed, ', '));
+    end
+    out = normalised;
+end
+
+function appendReportStatus(summaryFile, info, reportInfo)
+    %APPENDREPORTSTATUS  v1.5 -- write the report-stage paths into summary.txt.
+    %   The original summary.txt only carries per-source breakdown.  When
+    %   the report stage runs (now ON by default), the deliverable paths
+    %   land in the live console -- which an operator may have already
+    %   scrolled past.  Appending them to summary.txt makes the paths
+    %   durable on disk so triage is one `type summary.txt` away.
+    fid = fopen(summaryFile, 'a');
+    if fid < 3, return; end
+    cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '\nReport stage\n');
+    fprintf(fid,   '------------\n');
+    if isfield(info, 'ReportHtmlPath') && ~isempty(info.ReportHtmlPath)
+        fprintf(fid, 'HTML:    %s\n', info.ReportHtmlPath);
+    else
+        fprintf(fid, 'HTML:    (not produced)\n');
+    end
+    if isfield(reportInfo, 'DocxPath') && ~isempty(reportInfo.DocxPath)
+        fprintf(fid, 'Docx:    %s\n', reportInfo.DocxPath);
+    else
+        fprintf(fid, 'Docx:    (not produced)\n');
+    end
+    if isfield(reportInfo, 'PdfPath') && ~isempty(reportInfo.PdfPath)
+        fprintf(fid, 'Pdf:     %s\n', reportInfo.PdfPath);
+    else
+        fprintf(fid, 'Pdf:     (no PDF tier on this machine)\n');
+    end
+    if isfield(info, 'AuditSidecar') && ~isempty(info.AuditSidecar)
+        fprintf(fid, 'Sidecar: %s\n', info.AuditSidecar);
+    end
+    if isfield(reportInfo, 'BackendDisplay')
+        fprintf(fid, 'Backend: %s\n', reportInfo.BackendDisplay);
+    end
+end
+
+function appendReportFailure(summaryFile, ME)
+    fid = fopen(summaryFile, 'a');
+    if fid < 3, return; end
+    cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '\nReport stage\n');
+    fprintf(fid,   '------------\n');
+    fprintf(fid, 'FAILED: %s\n', ME.message);
+    try
+        rpt = getReport(ME, 'extended', 'hyperlinks', 'off');
+        fprintf(fid, '%s\n', rpt);
+    catch
     end
 end
 
