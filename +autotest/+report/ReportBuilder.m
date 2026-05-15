@@ -128,9 +128,28 @@ classdef ReportBuilder
                 sidecarPath = '';
             end
 
+            % 2026-05-14 -- minimal HTML deliverable.  Standalone single
+            % file with CAPCO-colored top/bottom banners and a compact
+            % summary table.  ALWAYS paints the classification fill
+            % colour (UNCLASSIFIED is the CAPCO green #007A33); the
+            % v1.7 worktree's "plain text for U / U//FOUO" override is
+            % intentionally NOT applied here -- the user wants the
+            % visual signal at a glance.
+            htmlPath = '';
+            try
+                htmlPath = fullfile(outputDir, [base '_TestReport.html']);
+                autotest.report.ReportBuilder.emitHtml(htmlPath, data, ...
+                    opts, audit, generatedPdfPath, docxPath, sidecarPath);
+            catch ME
+                warning('autotest:report:Html', ...
+                    'HTML emit failed (non-fatal): %s', ME.message);
+                htmlPath = '';
+            end
+
             info = struct( ...
                 'DocxPath',       docxPath, ...
                 'PdfPath',        generatedPdfPath, ...
+                'HtmlPath',       htmlPath, ...
                 'BackendLogPath', backendLog, ...
                 'BackendName',    detector.BackendName, ...
                 'BackendDisplay', detector.BackendDisplay, ...
@@ -569,5 +588,146 @@ classdef ReportBuilder
             [~, base, ~] = fileparts(folder);
             base = regexprep(base, '[^A-Za-z0-9_-]+', '_');
         end
+        function emitHtml(path, data, opts, audit, pdfPath, docxPath, sidecarPath)
+            %EMITHTML  Standalone HTML deliverable with CAPCO banner.
+            %   Writes a single self-contained .html file with the
+            %   classification banner painted in the CAPCO fill colour
+            %   (UNCLASSIFIED -> green) at both the top and bottom of
+            %   the page, a metadata table, the headline pass/fail
+            %   counts, and the per-source breakdown.  Intentionally
+            %   compact -- the .docx remains the full-fidelity
+            %   deliverable; this is the easy-to-skim companion.
+            if nargin < 5, pdfPath = ''; end
+            if nargin < 6, docxPath = ''; end
+            if nargin < 7, sidecarPath = ''; end
+
+            cls = 'UNCLASSIFIED';
+            if isfield(opts, 'Classification') && ~isempty(opts.Classification)
+                cls = char(opts.Classification);
+            end
+            fill = autotest.report.Style.classificationFill(cls);
+            textColor = 'FFFFFF';
+
+            s = data.Summary;
+            gTot  = 0; if isfield(s, 'GenTotal'),      gTot  = s.GenTotal;      end
+            gPass = 0; if isfield(s, 'GenPassed'),     gPass = s.GenPassed;     end
+            gFail = 0; if isfield(s, 'GenFailed'),     gFail = s.GenFailed;     end
+            gInc  = 0; if isfield(s, 'GenIncomplete'), gInc  = s.GenIncomplete; end
+
+            displayName = '';
+            if isfield(opts, 'DisplayName'), displayName = char(opts.DisplayName); end
+            owner = '';
+            if isfield(opts, 'Owner'), owner = char(opts.Owner); end
+            docVersion = '';
+            if isfield(opts, 'DocVersion'), docVersion = char(opts.DocVersion); end
+
+            esc = @autotest.report.ReportBuilder.htmlEscape;
+            bannerStyle = sprintf( ...
+                'background:#%s;color:#%s;font-weight:bold;text-align:center;padding:10px 0;letter-spacing:0.08em;font-family:Calibri,Segoe UI,Arial,sans-serif;font-size:14px;', ...
+                fill, textColor);
+
+            buf = strings(0,1);
+            buf(end+1,1) = "<!DOCTYPE html>";
+            buf(end+1,1) = sprintf("<html lang=""en""><head><meta charset=""utf-8""><title>%s -- Test Report</title>", esc(displayName));
+            buf(end+1,1) = "<style>";
+            buf(end+1,1) = "body{margin:0;padding:0;background:#FFFFFF;color:#1F2937;font-family:Georgia,'Times New Roman',serif;font-size:14px;line-height:1.55}";
+            buf(end+1,1) = "main{max-width:880px;margin:0 auto;padding:24px}";
+            buf(end+1,1) = "h1{font-family:Calibri,'Segoe UI',Arial,sans-serif;font-size:26px;margin:18px 0 4px}";
+            buf(end+1,1) = "h2{font-family:Calibri,'Segoe UI',Arial,sans-serif;font-size:18px;margin:24px 0 8px;color:#1F2937;border-bottom:2px solid #B45309;padding-bottom:4px}";
+            buf(end+1,1) = "table{border-collapse:collapse;width:100%;margin:8px 0 16px}";
+            buf(end+1,1) = "th,td{border:1px solid #BFBFBF;padding:6px 10px;text-align:left;font-size:13px}";
+            buf(end+1,1) = "th{background:#E7E6E6;font-weight:bold;font-family:Calibri,'Segoe UI',Arial,sans-serif}";
+            buf(end+1,1) = ".kv th{width:30%;background:#F2F2F2;font-weight:normal;color:#4B5563}";
+            buf(end+1,1) = ".pill{display:inline-block;padding:2px 10px;border-radius:10px;font-family:Calibri,'Segoe UI',Arial,sans-serif;font-size:12px;font-weight:bold}";
+            buf(end+1,1) = ".pill-pass{background:#D1FAE5;color:#065F46}";
+            buf(end+1,1) = ".pill-fail{background:#FEE2E2;color:#991B1B}";
+            buf(end+1,1) = ".pill-inc{background:#FEF3C7;color:#92400E}";
+            buf(end+1,1) = sprintf(".banner{%s}", bannerStyle);
+            buf(end+1,1) = "</style></head><body>";
+
+            buf(end+1,1) = sprintf("<div class=""banner"">%s</div>", esc(cls));
+            buf(end+1,1) = "<main>";
+
+            if isempty(displayName), displayName = 'Project'; end
+            buf(end+1,1) = sprintf("<h1>%s &mdash; System Test Report</h1>", esc(displayName));
+            if ~isempty(docVersion)
+                buf(end+1,1) = sprintf("<div style=""color:#4B5563;font-family:Calibri,'Segoe UI',Arial,sans-serif;font-size:13px;margin-bottom:8px;"">Document version %s</div>", esc(docVersion));
+            end
+
+            buf(end+1,1) = "<h2>Metadata</h2><table class=""kv"">";
+            buf(end+1,1) = sprintf("<tr><th>Classification</th><td>%s</td></tr>", esc(cls));
+            buf(end+1,1) = sprintf("<tr><th>Owner</th><td>%s</td></tr>", esc(owner));
+            if isfield(audit, 'CycleTimestamp')
+                buf(end+1,1) = sprintf("<tr><th>Test-cycle timestamp</th><td>%s</td></tr>", esc(audit.CycleTimestamp));
+            end
+            if isfield(audit, 'BuiltAt')
+                buf(end+1,1) = sprintf("<tr><th>Report built</th><td>%s</td></tr>", esc(audit.BuiltAt));
+            end
+            if isfield(audit, 'CommitHash')
+                buf(end+1,1) = sprintf("<tr><th>matlabunittest commit</th><td>%s</td></tr>", esc(audit.CommitHash));
+            end
+            if isfield(audit, 'BackendDisplay')
+                buf(end+1,1) = sprintf("<tr><th>DOCX backend</th><td>%s</td></tr>", esc(audit.BackendDisplay));
+            end
+            buf(end+1,1) = "</table>";
+
+            buf(end+1,1) = "<h2>Generated tests &mdash; headline</h2><table>";
+            buf(end+1,1) = "<tr><th>Total</th><th>Passed</th><th>Failed</th><th>Incomplete</th></tr>";
+            buf(end+1,1) = sprintf("<tr><td>%d</td><td><span class=""pill pill-pass"">%d</span></td><td><span class=""pill pill-fail"">%d</span></td><td><span class=""pill pill-inc"">%d</span></td></tr>", ...
+                gTot, gPass, gFail, gInc);
+            buf(end+1,1) = "</table>";
+
+            if isfield(data, 'PerSource') && ~isempty(data.PerSource)
+                buf(end+1,1) = "<h2>Per-source breakdown</h2><table>";
+                buf(end+1,1) = "<tr><th>Source</th><th>Total</th><th>Passed</th><th>Failed</th></tr>";
+                ps = data.PerSource;
+                if iscell(ps)
+                    for k = 1:numel(ps)
+                        row = ps{k};
+                        if iscell(row) && numel(row) >= 4
+                            buf(end+1,1) = sprintf("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", ...
+                                esc(char(row{1})), esc(char(row{2})), esc(char(row{3})), esc(char(row{4})));
+                        end
+                    end
+                end
+                buf(end+1,1) = "</table>";
+            end
+
+            buf(end+1,1) = "<h2>Companion deliverables</h2><table class=""kv"">";
+            if ~isempty(docxPath)
+                buf(end+1,1) = sprintf("<tr><th>DOCX</th><td>%s</td></tr>", esc(docxPath));
+            end
+            if ~isempty(pdfPath)
+                buf(end+1,1) = sprintf("<tr><th>PDF</th><td>%s</td></tr>", esc(pdfPath));
+            else
+                buf(end+1,1) = "<tr><th>PDF</th><td><em>(no PDF tier on this machine)</em></td></tr>";
+            end
+            if ~isempty(sidecarPath)
+                buf(end+1,1) = sprintf("<tr><th>Audit sidecar</th><td>%s</td></tr>", esc(sidecarPath));
+            end
+            buf(end+1,1) = "</table>";
+
+            buf(end+1,1) = "</main>";
+            buf(end+1,1) = sprintf("<div class=""banner"">%s</div>", esc(cls));
+            buf(end+1,1) = "</body></html>";
+
+            fid = fopen(path, 'w');
+            if fid < 3
+                error('autotest:report:Html', 'Cannot open %s for writing.', path);
+            end
+            cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+            for i = 1:numel(buf)
+                fprintf(fid, '%s\n', char(buf(i)));
+            end
+        end
+
+        function s = htmlEscape(s)
+            if isempty(s), s = ''; return; end
+            s = strrep(char(s), '&', '&amp;');
+            s = strrep(s, '<', '&lt;');
+            s = strrep(s, '>', '&gt;');
+            s = strrep(s, '"', '&quot;');
+        end
+
     end
 end
